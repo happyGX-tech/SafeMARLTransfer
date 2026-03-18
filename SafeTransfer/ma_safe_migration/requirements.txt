@@ -1,0 +1,28 @@
+# Core dependencies
+numpy>=1.21.0
+torch>=1.10.0
+gymnasium>=0.28.0
+
+# Safety-Gymnasium (must install from source )
+# git+https://github.com/PKU-Alignment/safety-gymnasium.git
+# safety-gymnasium>=1.0.0
+
+# Data handling
+h5py>=3.6.0
+pickle5>=0.0.11; python_version < "3.8"
+
+# Visualization
+matplotlib>=3.5.0
+imageio>=2.9.0
+imageio-ffmpeg>=0.4.5
+
+# Optional: For advanced rendering
+pygame>=2.1.0
+
+# Optional: For parallel data collection
+ray>=2.0.0
+
+# Development
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0
