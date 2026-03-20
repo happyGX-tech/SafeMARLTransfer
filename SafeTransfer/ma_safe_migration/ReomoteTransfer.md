@@ -15,7 +15,8 @@
 
 1. 可成功创建并运行 Safety-Gymnasium 多智能体环境。
 2. 可执行 FSRL 行为策略训练（CTCE 模式）。
-3. 可执行离线数据采集（random / fsrl_ckpt，CTCE 推理模式）。
+3. 可执行离线数据采集（FSRL checkpoint，CTCE Collector 模式）。
+4. 可将采集结果导出为 OSRL/DSRL 可读 NPZ 数据。
 4. 可稳定保存日志、checkpoint、离线数据。
 
 ---
@@ -183,57 +184,69 @@ python verify_safety_gym_backend.py --num-agents 3 --steps 20 --render-mode rgb_
 - 不报 ImportError / ModuleNotFoundError
 - 正常输出 rewards/costs 并完成 Verification completed
 
-### 6.2 数据采集 smoke test（随机策略）
+### 6.2 数据采集 smoke test（FSRL checkpoint）
 
 ```bash
-python run_data_collection.py \
-  --num-agents 3 \
-  --num-episodes 1 \
-  --max-episode-steps 5 \
-  --policy-type random \
-  --output-dir ./data/ctce_smoke_remote \
-  --save-interval 1 \
-  --randomize-layout \
+python third_party/FSRL/examples/customized/collect_dataset.py \
+  --backend safety_gym \
+  --num_agents 3 \
+  --collect_only True \
+  --num_episodes 2 \
+  --policy_checkpoint ./third_party/FSRL/logs_local/ctce_smoke_train/checkpoint/model.pt \
+  --output_dir ./data/ctce_smoke_remote \
+  --dataset_name offline_dataset_ctce.hdf5 \
   --seed 7
 ```
 
 通过标准：
-- 生成 offline_dataset_final.hdf5 / offline_dataset_final.pkl / dataset_stats.txt
+- 生成 `offline_dataset_ctce.hdf5`
 
 ### 6.3 CTCE FSRL 训练与采样验证
 
 先训练：
 
 ```bash
-python experiments/train_fsrl_behavior_on_safetransfer.py \
-  --num-agents 3 \
-  --fsrl-train-mode ctce \
+python third_party/FSRL/examples/customized/collect_dataset.py \
+  --backend safety_gym \
+  --num_agents 3 \
+  --collect_only False \
   --epoch 2 \
-  --step-per-epoch 2000 \
-  --training-num 2 \
-  --testing-num 1 \
+  --step_per_epoch 2000 \
+  --training_num 2 \
+  --testing_num 1 \
   --device cpu \
-  --run-name ctce_smoke_train
+  --name ctce_smoke_train \
+  --logdir ./third_party/FSRL/logs_local \
+  --logger_backend tensorboard \
+  --vector_env auto \
+  --memory_guard auto
 ```
 
-再采样：
+再采样并导出 OSRL 数据：
 
 ```bash
-python run_data_collection.py \
+python third_party/FSRL/examples/customized/collect_dataset.py \
+  --backend safety_gym \
+  --num_agents 3 \
+  --collect_only True \
+  --num_episodes 2 \
+  --policy_checkpoint ./third_party/FSRL/logs_local/fast-safe-rl/ctce-n3-cost-5-100/ctce_smoke_train/checkpoint/model.pt \
+  --output_dir ./data/ctce_fsrl_smoke_remote \
+  --dataset_name offline_dataset_ctce.hdf5 \
+  --seed 11
+
+python third_party/OSRL/examples/tools/export_ctce_hdf5_to_osrl.py \
+  --input-hdf5 ./data/ctce_fsrl_smoke_remote/<run_tag>/offline_dataset_ctce.hdf5 \
+  --output-npz ./data/ctce_fsrl_smoke_remote/<run_tag>/offline_dataset_osrl.npz \
   --num-agents 3 \
-  --num-episodes 2 \
-  --policy-type fsrl_ckpt \
-  --policy-checkpoint ./third_party/FSRL/logs_local/ctce_smoke_train/checkpoint/model.pt \
-  --fsrl-inference-mode ctce \
-  --output-dir ./data/ctce_fsrl_smoke_remote \
-  --save-interval 1 \
-  --randomize-layout \
+  --policy-tag fsrl_ctce \
+  --checkpoint-id ctce_smoke_train \
   --seed 11
 ```
 
 通过标准：
 - 采样不报维度不匹配错误
-- 数据文件生成成功
+- 导出 `offline_dataset_osrl.npz` 与 `offline_dataset_osrl.meta.json`
 
 ---
 
@@ -243,13 +256,13 @@ python run_data_collection.py \
 2. 训练日志重定向到文件：
 
 ```bash
-python experiments/train_fsrl_behavior_on_safetransfer.py ... 2>&1 | tee train_ctce.log
+python third_party/FSRL/examples/customized/collect_dataset.py --collect_only False ... 2>&1 | tee train_ctce.log
 ```
 
 3. 采样日志重定向到文件：
 
 ```bash
-python run_data_collection.py ... 2>&1 | tee collect_ctce.log
+python third_party/FSRL/examples/customized/collect_dataset.py ... 2>&1 | tee collect_ctce.log
 ```
 
 4. 建议定时备份：
@@ -295,7 +308,7 @@ pip install -e ../SRL/safety-gymnasium-main
 建议：
 
 1. 保持训练与采样 num_agents 一致
-2. CTCE 训练后优先用 --fsrl-inference-mode ctce 采样
+2. CTCE 训练后优先使用 `third_party/FSRL/examples/customized/collect_dataset.py` 采样
 
 ---
 
@@ -313,9 +326,9 @@ pip install -e ../SRL/safety-gymnasium-main
 ## 10. 最终验收清单
 
 1. verify_safety_gym_backend.py 可通过
-2. random 采样可生成离线数据文件
+2. CTCE 采样可生成 `offline_dataset_ctce.hdf5`
 3. CTCE FSRL 训练可产出 checkpoint
-4. fsrl_ckpt + ctce 采样可通过
+4. OSRL 导出脚本可生成 `offline_dataset_osrl.npz` 与 metadata
 5. 日志与数据目录结构清晰、可备份
 
 完成以上五项，即可进入远程大规模训练/采集阶段。

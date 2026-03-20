@@ -193,10 +193,10 @@ class Builder(gymnasium.Env, gymnasium.utils.EzPickle):
         # Reset stateful parts of the environment
         self.first_reset = False  # Built our first world successfully
 
-        state = self.task.obs()
+        state_by_agent = self.task.obs_by_agent()
         observations, infos = {}, {}
         for agents in self.possible_agents:
-            observations[agents] = state
+            observations[agents] = state_by_agent[agents]
             infos[agents] = info
 
         # Return an observation
@@ -279,10 +279,10 @@ class Builder(gymnasium.Env, gymnasium.utils.EzPickle):
         if self.render_parameters.mode == 'human':
             self.render()
 
-        state = self.task.obs()
+        state_by_agent = self.task.obs_by_agent()
         observations, terminateds, truncateds, infos = {}, {}, {}, {}
         for agents in self.possible_agents:
-            observations[agents] = state
+            observations[agents] = state_by_agent[agents]
             terminateds[agents] = self.terminated
             truncateds[agents] = self.truncated
             infos[agents] = info
@@ -383,9 +383,9 @@ class Builder(gymnasium.Env, gymnasium.utils.EzPickle):
         """Helper to get possible agents."""
         return self.task.agent.possible_agents
 
-    def observation_space(self, _: str) -> gymnasium.spaces.Box | gymnasium.spaces.Dict:
+    def observation_space(self, agent: str) -> gymnasium.spaces.Box | gymnasium.spaces.Dict:
         """Helper to get observation space."""
-        return self.task.observation_space
+        return self.task.observation_space_by_agent[agent]
 
     @property
     def obs_space_dict(self) -> dict[str, gymnasium.spaces.Box]:

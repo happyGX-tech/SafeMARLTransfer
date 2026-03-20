@@ -109,7 +109,7 @@ def make_marl_env(
         env_id: 环境ID（可选）
         num_agents: 智能体数量
         render_mode: 渲染模式
-        backend: 环境后端，目前仅支持 'safety_gym'
+        backend: 环境后端，支持 'safety_gym'
         **kwargs: 额外的环境参数
 
     Returns:

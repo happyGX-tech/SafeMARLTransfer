@@ -189,7 +189,11 @@ class BaseTask(Underlying):  # pylint: disable=too-many-instance-attributes,too-
 
         self.action_space = self.agent.action_space
         self.observation_space = None
+        self.observation_space_by_agent: dict[str, gymnasium.spaces.Box | gymnasium.spaces.Dict] = {}
         self.obs_info = ObservationInfo()
+        self._obs_space_dict_by_agent: list[gymnasium.spaces.Dict] = []
+        self._obs_keys_by_agent: list[list[str]] = []
+        self._obs_source_by_agent: list[dict[str, str | None]] = []
 
         self._is_load_static_geoms = False  # Whether to load static geoms in current task.
         self.static_geoms_names: dict
@@ -250,63 +254,116 @@ class BaseTask(Underlying):  # pylint: disable=too-many-instance-attributes,too-
 
         sensor_dict = self.agent.build_sensor_observation_space()
 
-        def sensor_owner_index(sensor_name: str) -> int:
-            match = re.search(r'(\d+)$', sensor_name)
-            if not match:
-                return 0
-            start = match.start(1)
-            if start > 0 and sensor_name[start - 1] == '_':
-                return 0
-            owner = int(match.group(1))
-            return owner if 0 <= owner < self.agent.nums else 0
+        def sensor_owner_and_base(sensor_name: str) -> tuple[int, str]:
+            for idx in range(self.agent.nums - 1, 0, -1):
+                suffix = str(idx)
+                if not sensor_name.endswith(suffix):
+                    continue
+                base_name = sensor_name[: -len(suffix)]
+                if base_name in sensor_dict:
+                    return idx, base_name
+            return 0, sensor_name
 
-        per_agent_sensor_dict = [OrderedDict() for _ in range(self.agent.nums)]
-        for name, space in sensor_dict.items():
-            per_agent_sensor_dict[sensor_owner_index(name)][name] = space
+        canonical_sensor_spaces: OrderedDict[str, gymnasium.spaces.Space] = OrderedDict()
+        per_agent_sensor_sources = [OrderedDict() for _ in range(self.agent.nums)]
+        for sensor_name, sensor_space in sensor_dict.items():
+            owner_idx, base_name = sensor_owner_and_base(sensor_name)
+            if owner_idx == 0 and base_name not in canonical_sensor_spaces:
+                canonical_sensor_spaces[base_name] = sensor_space
+
+        for base_name, base_space in canonical_sensor_spaces.items():
+            for agent_idx in range(self.agent.nums):
+                source_name = base_name if agent_idx == 0 else f'{base_name}{agent_idx}'
+                if source_name in sensor_dict:
+                    per_agent_sensor_sources[agent_idx][base_name] = source_name
+                else:
+                    per_agent_sensor_sources[agent_idx][base_name] = None
 
         if self.observe_vision:
             width, height = self.vision_env_conf.vision_size
             rows, cols = height, width
             self.vision_env_conf.vision_size = (rows, cols)
 
+        per_agent_obs_space_dict = [OrderedDict() for _ in range(self.agent.nums)]
+        self._obs_source_by_agent = [OrderedDict() for _ in range(self.agent.nums)]
+
         for agent_idx in range(self.agent.nums):
-            obs_space_dict.update(per_agent_sensor_dict[agent_idx])
+            for base_name, base_space in canonical_sensor_spaces.items():
+                local_key = f'sensor::{base_name}'
+                source_name = per_agent_sensor_sources[agent_idx][base_name]
+                per_agent_obs_space_dict[agent_idx][local_key] = base_space
+                self._obs_source_by_agent[agent_idx][local_key] = source_name
+
+            obs_space_dict.update(sensor_dict)
 
             suffix = '' if agent_idx == 0 else str(agent_idx)
             for obstacle in self._obstacles:
                 if obstacle.is_lidar_observed:
                     name = obstacle.name + '_' + f'lidar{suffix}'
-                    obs_space_dict[name] = gymnasium.spaces.Box(
+                    local_name = obstacle.name + '_' + 'lidar'
+                    obs_space = gymnasium.spaces.Box(
                         0.0,
                         1.0,
                         (self.lidar_conf.num_bins,),
                         dtype=np.float64,
                     )
+                    obs_space_dict[name] = obs_space
+                    per_agent_obs_space_dict[agent_idx][local_name] = obs_space
+                    self._obs_source_by_agent[agent_idx][local_name] = name
                 if hasattr(obstacle, 'is_comp_observed') and obstacle.is_comp_observed:
                     name = obstacle.name + '_' + f'comp{suffix}'
-                    obs_space_dict[name] = gymnasium.spaces.Box(
+                    local_name = obstacle.name + '_' + 'comp'
+                    obs_space = gymnasium.spaces.Box(
                         -1.0,
                         1.0,
                         (self.compass_conf.shape,),
                         dtype=np.float64,
                     )
+                    obs_space_dict[name] = obs_space
+                    per_agent_obs_space_dict[agent_idx][local_name] = obs_space
+                    self._obs_source_by_agent[agent_idx][local_name] = name
+
+            other_agents_lidar_name = f'agents_lidar{suffix}'
+            other_agents_lidar_space = gymnasium.spaces.Box(
+                0.0,
+                1.0,
+                (self.lidar_conf.num_bins,),
+                dtype=np.float64,
+            )
+            obs_space_dict[other_agents_lidar_name] = other_agents_lidar_space
+            per_agent_obs_space_dict[agent_idx]['agents_lidar'] = other_agents_lidar_space
+            self._obs_source_by_agent[agent_idx]['agents_lidar'] = other_agents_lidar_name
 
             if self.observe_vision:
-                obs_space_dict[f'vision_{agent_idx}'] = gymnasium.spaces.Box(
+                vision_space = gymnasium.spaces.Box(
                     0,
                     255,
                     (*self.vision_env_conf.vision_size, 3),
                     dtype=np.uint8,
                 )
+                obs_space_dict[f'vision_{agent_idx}'] = vision_space
+                per_agent_obs_space_dict[agent_idx]['vision'] = vision_space
+                self._obs_source_by_agent[agent_idx]['vision'] = f'vision_{agent_idx}'
 
         self.obs_info.obs_space_dict = gymnasium.spaces.Dict(obs_space_dict)
+        self._obs_space_dict_by_agent = [
+            gymnasium.spaces.Dict(agent_space_dict) for agent_space_dict in per_agent_obs_space_dict
+        ]
+        self._obs_keys_by_agent = [list(agent_space_dict.keys()) for agent_space_dict in per_agent_obs_space_dict]
+
+        self.observation_space_by_agent = {}
+        for idx, agent_name in enumerate(self.agent.possible_agents):
+            if self.observation_flatten:
+                self.observation_space_by_agent[agent_name] = gymnasium.spaces.utils.flatten_space(
+                    self._obs_space_dict_by_agent[idx],
+                )
+            else:
+                self.observation_space_by_agent[agent_name] = self._obs_space_dict_by_agent[idx]
 
         if self.observation_flatten:
-            self.observation_space = gymnasium.spaces.utils.flatten_space(
-                self.obs_info.obs_space_dict,
-            )
+            self.observation_space = self.observation_space_by_agent[self.agent.possible_agents[0]]
         else:
-            self.observation_space = self.obs_info.obs_space_dict
+            self.observation_space = self.observation_space_by_agent[self.agent.possible_agents[0]]
 
     def _build_placements_dict(self) -> None:
         """Build a dict of placements.
@@ -431,8 +488,8 @@ class BaseTask(Underlying):  # pylint: disable=too-many-instance-attributes,too-
             placements_dict[object_fmt.format(i=i)] = (placements, object_keepout)
         return placements_dict
 
-    def obs(self) -> dict | np.ndarray:
-        """Return the observation of our agent."""
+    def _collect_obs_dict(self) -> dict:
+        """Collect full observation dictionary before flattening/splitting."""
         # pylint: disable-next=no-member
         mujoco.mj_forward(self.model, self.data)  # Needed to get sensor's data correct
         obs = {}
@@ -461,9 +518,49 @@ class BaseTask(Underlying):  # pylint: disable=too-many-instance-attributes,too-
                 camera_name = 'vision' if agent_idx == 0 else f'vision{agent_idx}'
                 obs[f'vision_{agent_idx}'] = self._obs_vision(camera_name=camera_name)
 
+        for agent_idx in range(self.agent.nums):
+            suffix = '' if agent_idx == 0 else str(agent_idx)
+            other_positions = [
+                self.agent.pos(other_idx)
+                for other_idx in range(self.agent.nums)
+                if other_idx != agent_idx
+            ]
+            obs[f'agents_lidar{suffix}'] = self._obs_lidar_pseudo_by_index(
+                other_positions,
+                agent_idx=agent_idx,
+            )
+
         assert self.obs_info.obs_space_dict.contains(
             obs,
         ), f'Bad obs {obs} {self.obs_info.obs_space_dict}'
+
+        return obs
+
+    def _build_local_obs(self, full_obs: dict, agent_idx: int) -> dict | np.ndarray:
+        local_obs_dict = {}
+        space_dict = self._obs_space_dict_by_agent[agent_idx]
+        for key in self._obs_keys_by_agent[agent_idx]:
+            source_key = self._obs_source_by_agent[agent_idx][key]
+            if source_key is not None and source_key in full_obs:
+                local_obs_dict[key] = full_obs[source_key]
+            else:
+                local_obs_dict[key] = np.zeros(space_dict.spaces[key].shape, dtype=space_dict.spaces[key].dtype)
+
+        if self.observation_flatten:
+            return gymnasium.spaces.utils.flatten(self._obs_space_dict_by_agent[agent_idx], local_obs_dict)
+        return local_obs_dict
+
+    def obs_by_agent(self) -> dict[str, dict | np.ndarray]:
+        """Return per-agent local observations."""
+        full_obs = self._collect_obs_dict()
+        return {
+            agent_name: self._build_local_obs(full_obs, idx)
+            for idx, agent_name in enumerate(self.agent.possible_agents)
+        }
+
+    def obs(self) -> dict | np.ndarray:
+        """Return the full observation of environment state (legacy behavior)."""
+        obs = self._collect_obs_dict()
 
         if self.observation_flatten:
             obs = gymnasium.spaces.utils.flatten(self.obs_info.obs_space_dict, obs)

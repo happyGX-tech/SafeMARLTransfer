@@ -1,15 +1,15 @@
+﻿import importlib
 import os
 import signal
 import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
-import bullet_safety_gym
 import gymnasium as gym
 import pyrallis
 import torch
 from tianshou.data import ReplayBuffer, VectorReplayBuffer
-from tianshou.env import BaseVectorEnv, ShmemVectorEnv, SubprocVectorEnv
+from tianshou.env import DummyVectorEnv, ShmemVectorEnv, SubprocVectorEnv
 from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
 from torch.distributions import Independent, Normal
@@ -21,169 +21,97 @@ from fsrl.utils import TensorboardLogger, WandbLogger
 from fsrl.utils.exp_util import auto_name, seed_all
 from fsrl.utils.net.common import ActorCritic
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 
 @dataclass
 class TrainCfg:
-    # general task params
-    task: str = "SafetyCarCircle-v0"
-    cost_start: float = 5
-    cost_end: float = 100
+    # unified safety_gym + CTCE config
+    task: str = "SafetyAntMultiGoalN3-v0"
+    backend: str = "safety_gym"
+    num_agents: int = 3
+    env_id: Optional[str] = None
+    randomize_layout: bool = True
+    num_hazards: Optional[int] = None
+    world_size: Optional[float] = None
+
+    # schedule / training lengths
+    cost_start: float = 15
+    cost_end: float = 120
     epoch_start: int = 100
     epoch_end: int = 900
     epoch: int = 1000
     max_traj_len: int = 1500
+
+    # collector behavior
     collect_in_train: bool = True
-    # for trajectory buffer
+    collect_only: bool = False
+    num_episodes: int = 200
+    policy_checkpoint: Optional[str] = None
+    policy_device: Optional[str] = None
+    dataset_name: str = "offline_dataset_ctce.hdf5"
+    output_dir: Optional[str] = None
+
+    # buffer filter
     rmin: float = -9999
     rmax: float = 9999
     cmin: float = 0
     cmax: float = 300
-    use_lagrangian: bool = True
+
+    # runtime
     device: str = "cpu"
-    thread: int = 4  # if use "cpu" to train
+    logger_backend: str = "auto"  # auto | tensorboard | wandb
+    thread: int = 4
     seed: int = 10
-    use_default_cfg: bool = True
-    # algorithm params
+
+    # TRPOlag model
     lr: float = 5e-4
-    hidden_sizes: Tuple[int, ...] = (128, 128)
+    hidden_sizes: Optional[Tuple[int, ...]] = None
     unbounded: bool = False
     last_layer_scale: bool = False
-    # PPO specific arguments
     target_kl: float = 0.001
     backtrack_coeff: float = 0.8
     max_backtracks: int = 10
     optim_critic_iters: int = 20
     gae_lambda: float = 0.95
-    norm_adv: bool = True  # good for improving training stability
-    # Lagrangian specific arguments
+    norm_adv: bool = True
     use_lagrangian: bool = True
     lagrangian_pid: Tuple[float, ...] = (0.05, 0.005, 0.1)
     rescaling: bool = True
-    # Base policy common arguments
     gamma: float = 0.99
     max_batchsize: int = 100000
     rew_norm: bool = False
     deterministic_eval: bool = False
     action_scaling: bool = True
     action_bound_method: str = "clip"
-    # collecting params
+
+    # trainer loop
     episode_per_collect: int = 10
     step_per_epoch: int = 10000
-    repeat_per_collect: int = 4  # increasing this can improve efficiency, but less stability
+    repeat_per_collect: int = 4
     buffer_size: int = 100000
-    worker: str = "ShmemVectorEnv"
     training_num: int = 20
     testing_num: int = 2
-    # general params
-    # batch-size >> steps per collect means calculating all data in one singe forward.
+    vector_env: str = "auto"  # auto | dummy | shmem | subproc
+    memory_guard: str = "auto"  # auto | on | off
+    max_parallel_envs: int = 1
     batch_size: int = 99999
-    reward_threshold: float = 10000  # for early stop purpose
     save_interval: int = 4
-    resume: bool = False  # TODO
-    save_ckpt: bool = True  # set this to True to save the policy model
+    resume: bool = False
+    save_ckpt: bool = True
     verbose: bool = True
-    render: bool = False
-    # logger params
+
+    # logger outputs
     logdir: str = "logs"
     project: str = "fast-safe-rl"
     group: Optional[str] = None
     name: Optional[str] = None
     prefix: Optional[str] = "trpol"
     suffix: Optional[str] = ""
-
-
-########################################################
-######## bullet-safety-gym task default configs ########
-########################################################
-
-
-@dataclass
-class BulletCarCircleCfg(TrainCfg):
-    pass
-
-
-@dataclass
-class BulletBallCircleCfg(TrainCfg):
-    task: str = "SafetyBallCircle-v0"
-    cost_start: float = 5
-    cost_end: float = 200
-    epoch_start: int = 100
-    epoch_end: int = 900
-    epoch: int = 1000
-    max_traj_len: int = 1000
-    collect_in_train: bool = True
-    testing_num: int = 2
-    deterministic_eval: bool = False
-
-
-@dataclass
-class BulletAntRunCfg(TrainCfg):
-    task: str = "SafetyAntRun-v0"
-    cost_start: float = 5
-    cost_end: float = 200
-    epoch_start: int = 400
-    epoch_end: int = 2500
-    epoch: int = 2600
-    max_traj_len: int = 2000
-    collect_in_train: bool = False
-    testing_num: int = 4
-    deterministic_eval: bool = False
-
-
-@dataclass
-class BulletAntCircleCfg(TrainCfg):
-    task: str = "SafetyAntCircle-v0"
-    hidden_sizes = [256, 256]
-    cost_start: float = 5
-    cost_end: float = 200
-    epoch_start: int = 2000
-    epoch_end: int = 5000
-    epoch: int = 5400
-    max_traj_len: int = 5000
-    collect_in_train: bool = False
-    testing_num: int = 2
-    deterministic_eval: bool = False
-
-
-@dataclass
-class BulletDroneRunCfg(TrainCfg):
-    task: str = "SafetyDroneRun-v0"
-    cost_start: float = 100
-    cost_end: float = 5
-    epoch_start: int = 50
-    epoch_end: int = 800
-    epoch: int = 1000
-    max_traj_len: int = 1500
-    collect_in_train: bool = True
-    testing_num: int = 2
-    deterministic_eval: bool = False
-    target_kl: float = 0.0005
-
-
-@dataclass
-class BulletDroneCircleCfg(TrainCfg):
-    task: str = "SafetyDroneCircle-v0"
-    cost_start: float = 5
-    cost_end: float = 150
-    epoch_start: int = 500
-    epoch_end: int = 2500
-    epoch: int = 2600
-    max_traj_len: int = 2000
-    collect_in_train: bool = False
-    testing_num: int = 2
-    deterministic_eval: bool = False
-
-
-TASK_TO_CFG = {
-    "SafetyCarRun-v0": TrainCfg,
-    "SafetyCarCircle-v0": TrainCfg,
-    "SafetyBallRun-v0": TrainCfg,
-    "SafetyBallCircle-v0": BulletBallCircleCfg,
-    "SafetyDroneRun-v0": BulletDroneRunCfg,
-    "SafetyDroneCircle-v0": BulletDroneCircleCfg,
-    "SafetyAntRun-v0": BulletAntRunCfg,
-    "SafetyAntCircle-v0": BulletAntCircleCfg,
-}
+    strict_checkpoint_shape: bool = True
 
 
 class ActorProbLargeVar(ActorProb):
@@ -220,42 +148,219 @@ def cost_limit_scheduler(epoch, epoch_start, epoch_end, cost_start, cost_end):
     return cost
 
 
+def _load_checkpoint_config(policy_checkpoint: Optional[str]) -> Dict[str, Any]:
+    if not policy_checkpoint:
+        return {}
+    if os.path.isdir(policy_checkpoint):
+        config_path = os.path.join(policy_checkpoint, "config.yaml")
+    else:
+        parent = os.path.dirname(os.path.dirname(policy_checkpoint))
+        config_path = os.path.join(parent, "config.yaml")
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        import yaml
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _infer_hidden_sizes_from_checkpoint(policy_checkpoint: Optional[str]) -> Optional[Tuple[int, ...]]:
+    cfg = _load_checkpoint_config(policy_checkpoint)
+    hidden_sizes = cfg.get("hidden_sizes")
+    if not hidden_sizes:
+        return None
+    return tuple(int(x) for x in hidden_sizes)
+
+
+def _resolve_hidden_sizes(args: TrainCfg) -> Tuple[int, ...]:
+    if args.hidden_sizes:
+        return tuple(int(x) for x in args.hidden_sizes)
+
+    ckpt_sizes = _infer_hidden_sizes_from_checkpoint(args.policy_checkpoint)
+    if ckpt_sizes:
+        return ckpt_sizes
+
+    base = 64 * int(args.num_agents)
+    return (base, base)
+
+
+def _build_env_fn(args: TrainCfg):
+    if args.backend != "safety_gym":
+        raise ValueError(f"Only backend='safety_gym' is supported, got: {args.backend}")
+
+    env_module = importlib.import_module("envs.fsrl_single_agent_wrapper")
+    fsrl_ctce_env = getattr(env_module, "FSRLCTCESingleAgentEnv")
+
+    env_kwargs: Dict[str, Any] = {"randomize_layout": bool(args.randomize_layout)}
+    if args.num_hazards is not None:
+        env_kwargs["num_hazards"] = int(args.num_hazards)
+    if args.world_size is not None:
+        env_kwargs["world_size"] = float(args.world_size)
+
+    def _env_fn():
+        return fsrl_ctce_env(
+            num_agents=int(args.num_agents),
+            backend="safety_gym",
+            env_id=args.env_id,
+            **env_kwargs,
+        )
+
+    return _env_fn
+
+
+def _load_policy_checkpoint(policy, args: TrainCfg):
+    if not args.policy_checkpoint:
+        return
+
+    checkpoint_obj = None
+    if os.path.isdir(args.policy_checkpoint):
+        try:
+            from fsrl.utils.exp_util import load_config_and_model
+
+            _, checkpoint_obj = load_config_and_model(args.policy_checkpoint, best=False)
+        except Exception:
+            checkpoint_obj = None
+    if checkpoint_obj is None:
+        checkpoint_obj = torch.load(args.policy_checkpoint, map_location=args.device)
+
+    if isinstance(checkpoint_obj, dict) and "model" in checkpoint_obj:
+        state_dict = checkpoint_obj["model"]
+    else:
+        state_dict = checkpoint_obj
+
+    policy.load_state_dict(state_dict, strict=False)
+    policy.eval()
+
+
+def _validate_checkpoint_compatibility(args: TrainCfg, env) -> None:
+    if not args.policy_checkpoint:
+        return
+    ckpt_cfg = _load_checkpoint_config(args.policy_checkpoint)
+    if not ckpt_cfg:
+        return
+
+    expected_hidden = tuple(int(x) for x in ckpt_cfg.get("hidden_sizes", []) if x is not None)
+    actual_hidden = tuple(int(x) for x in (args.hidden_sizes or ()))
+    if expected_hidden and actual_hidden and expected_hidden != actual_hidden:
+        msg = (
+            f"Checkpoint hidden_sizes mismatch: checkpoint={expected_hidden}, current={actual_hidden}. "
+            "Please align hidden_sizes or use checkpoint-compatible config."
+        )
+        if args.strict_checkpoint_shape:
+            raise ValueError(msg)
+        print(f"[Warn] {msg}")
+
+    obs_dim_ckpt = ckpt_cfg.get("obs_dim")
+    act_dim_ckpt = ckpt_cfg.get("act_dim")
+    obs_dim_now = int(env.observation_space.shape[0])
+    act_dim_now = int(env.action_space.shape[0])
+    if obs_dim_ckpt is not None and int(obs_dim_ckpt) != obs_dim_now:
+        msg = f"Checkpoint obs_dim mismatch: checkpoint={obs_dim_ckpt}, current={obs_dim_now}."
+        if args.strict_checkpoint_shape:
+            raise ValueError(msg)
+        print(f"[Warn] {msg}")
+    if act_dim_ckpt is not None and int(act_dim_ckpt) != act_dim_now:
+        msg = f"Checkpoint act_dim mismatch: checkpoint={act_dim_ckpt}, current={act_dim_now}."
+        if args.strict_checkpoint_shape:
+            raise ValueError(msg)
+        print(f"[Warn] {msg}")
+
+
+def _resolve_vector_backend(args: TrainCfg) -> str:
+    if args.vector_env != "auto":
+        return args.vector_env
+    return "dummy" if os.name == "nt" else "shmem"
+
+
+def _apply_memory_guard(args: TrainCfg) -> bool:
+    guard_active = False
+    if args.memory_guard == "on":
+        guard_active = True
+    elif args.memory_guard == "auto":
+        guard_active = (os.name == "nt" and args.backend == "safety_gym")
+
+    if guard_active:
+        limit = max(1, int(args.max_parallel_envs))
+        if args.training_num > limit:
+            print(f"[Memory Guard] training_num {args.training_num} -> {limit}")
+            args.training_num = limit
+        if args.testing_num > limit:
+            print(f"[Memory Guard] testing_num {args.testing_num} -> {limit}")
+            args.testing_num = limit
+    return guard_active
+
+
+def _build_vec_env(env_fns, backend: str):
+    if backend == "dummy":
+        return DummyVectorEnv(env_fns)
+    if backend == "subproc":
+        return SubprocVectorEnv(env_fns)
+    return ShmemVectorEnv(env_fns)
+
+
+def _resolve_logger_backend(args: TrainCfg) -> str:
+    if args.logger_backend in ("tensorboard", "wandb"):
+        return args.logger_backend
+    has_wandb_key = bool(os.getenv("WANDB_API_KEY"))
+    return "wandb" if has_wandb_key else "tensorboard"
+
+
+def _save_trajectory_buffer(traj_buffer: TrajectoryBuffer, args: TrainCfg) -> str:
+    dataset_dir = args.output_dir or os.path.join(args.logdir, args.name)
+    os.makedirs(dataset_dir, exist_ok=True)
+    traj_buffer.save(dataset_dir, dataset_name=args.dataset_name)
+    return os.path.join(dataset_dir, args.dataset_name)
+
+
 @pyrallis.wrap()
 def train(args: TrainCfg):
     # set seed and computing
     seed_all(args.seed)
-    torch.set_num_threads(thread)
+    torch.set_num_threads(args.thread)
 
-    task = args.task
-    default_cfg = TASK_TO_CFG[task]() if task in TASK_TO_CFG else TrainCfg()
+    default_cfg = TrainCfg()
 
-    # use the default configs instead of the input args.
-    if args.use_default_cfg:
-        default_cfg.task = args.task
-        default_cfg.seed = args.seed
-        default_cfg.device = args.device
-        default_cfg.logdir = args.logdir
-        default_cfg.project = args.project
-        default_cfg.group = args.group
-        default_cfg.suffix = args.suffix
-        args = default_cfg
+    guard_active = _apply_memory_guard(args)
+    vec_backend = _resolve_vector_backend(args)
+    args.hidden_sizes = _resolve_hidden_sizes(args)
+    if args.policy_device:
+        args.device = args.policy_device
 
     # logger
+    logger_backend = _resolve_logger_backend(args)
     cfg = asdict(args)
     default_cfg = asdict(default_cfg)
     if args.name is None:
         args.name = auto_name(default_cfg, cfg, args.prefix, args.suffix)
     if args.group is None:
-        args.group = args.task + "-cost-" + str(int(args.cost_start)
-                                                ) + "-" + str(int(args.cost_end))
+        args.group = (
+            f"ctce-n{int(args.num_agents)}-cost-"
+            f"{int(args.cost_start)}-{int(args.cost_end)}"
+        )
     if args.logdir is not None:
         args.logdir = os.path.join(args.logdir, args.project, args.group)
-    logger = WandbLogger(cfg, args.project, args.group, args.name, args.logdir)
-    #logger = TensorboardLogger(args.logdir, log_txt=True, name=args.name)
+    if logger_backend == "wandb":
+        logger = WandbLogger(cfg, args.project, args.group, args.name, args.logdir)
+    else:
+        logger = TensorboardLogger(args.logdir, log_txt=True, name=args.name)
     logger.save_config(cfg, verbose=args.verbose)
 
+    print("=" * 72)
+    print("TRPOlag Unified Entry")
+    print("=" * 72)
+    print(f"backend: {args.backend}, num_agents: {args.num_agents}, collect_only: {args.collect_only}")
+    print(f"logger_backend: {logger_backend} (configured={args.logger_backend}), vector_env: {vec_backend}")
+    print(f"memory_guard: {args.memory_guard} (active={guard_active}, max_parallel_envs={args.max_parallel_envs})")
+    print(f"hidden_sizes: {args.hidden_sizes}, device: {args.device}")
+    print("=" * 72)
+
     # model
-    env = gym.make(args.task)
+    env_fn = _build_env_fn(args)
+    env = env_fn()
     state_shape = env.observation_space.shape or env.observation_space.n
     action_shape = env.action_space.shape or env.action_space.n
     max_action = env.action_space.high[0]
@@ -320,6 +425,8 @@ def train(args: TrainCfg):
         action_space=env.action_space,
         lr_scheduler=None
     )
+    _load_policy_checkpoint(policy, args)
+    _validate_checkpoint_compatibility(args, env)
 
     # collector
     traj_buffer = TrajectoryBuffer(
@@ -330,14 +437,33 @@ def train(args: TrainCfg):
         cmin=args.cmin,
         cmax=args.cmax
     )
+
+    if args.collect_only:
+        if not args.policy_checkpoint:
+            raise ValueError("collect_only=True requires --policy_checkpoint")
+        eval_env = env
+        collector = BasicCollector(
+            policy,
+            eval_env,
+            ReplayBuffer(1),
+            traj_buffer=traj_buffer,
+        )
+        result = collector.collect(n_episode=args.num_episodes, random=False)
+        dataset_path = _save_trajectory_buffer(traj_buffer, args)
+        print("Collect-only finished:")
+        for k, v in result.items():
+            print(f"  {k}: {v}")
+        print(f"Dataset saved to: {dataset_path}")
+        eval_env.close()
+        return
+
     if args.collect_in_train:
         train_collector = BasicCollector(
             policy, env, ReplayBuffer(args.buffer_size), traj_buffer=traj_buffer
         )
     else:
         training_num = min(args.training_num, args.episode_per_collect)
-        worker = eval(args.worker)
-        train_envs = worker([lambda: gym.make(args.task) for _ in range(training_num)])
+        train_envs = _build_vec_env([env_fn for _ in range(training_num)], vec_backend)
         train_collector = FastCollector(
             policy,
             train_envs,
@@ -345,7 +471,7 @@ def train(args: TrainCfg):
             exploration_noise=True,
         )
 
-    test_collector = BasicCollector(policy, gym.make(args.task), traj_buffer=traj_buffer)
+    test_collector = BasicCollector(policy, env_fn(), traj_buffer=traj_buffer)
 
     def stop_fn(reward, cost):
         return False
@@ -375,8 +501,8 @@ def train(args: TrainCfg):
     )
 
     def saving_dataset():
-        dataset_dir = os.path.join(args.logdir, args.name)
-        traj_buffer.save(dataset_dir)
+        dataset_path = _save_trajectory_buffer(traj_buffer, args)
+        print(f"Dataset saved to: {dataset_path}")
 
     def term_handler(signum, frame):
         print("Sig term handler, saving the dataset...")
@@ -399,11 +525,27 @@ def train(args: TrainCfg):
         print("keyboardinterrupt detected, saving the dataset...")
         saving_dataset()
     except Exception as e:
-        print("exception catched, saving the dataset...")
+        print(f"exception catched ({e}), saving the dataset...")
         saving_dataset()
+
+    finally:
+        if not args.collect_in_train:
+            try:
+                train_envs.close()
+            except Exception:
+                pass
+        try:
+            env.close()
+        except Exception:
+            pass
+        try:
+            test_collector.env.close()
+        except Exception:
+            pass
 
     saving_dataset()
 
 
 if __name__ == "__main__":
     train()
+
