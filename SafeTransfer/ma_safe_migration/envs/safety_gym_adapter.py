@@ -7,14 +7,47 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
+
+def _candidate_local_sg_paths() -> List[str]:
+    """Return candidate local source paths for safety_gymnasium.
+
+    Priority:
+    1) SAFETY_GYM_LOCAL_PATH (explicit override)
+    2) workspace_root/SRL/safety-gymnasium-main (historical layout)
+    3) ma_safe_migration/third_party/safety-gymnasium-main (optional colocated layout)
+    4) ma_safe_migration/external/safety-gymnasium-main (optional renamed vendor dir)
+    """
+    current_dir = os.path.dirname(__file__)
+    workspace_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
+    project_root = os.path.abspath(os.path.join(current_dir, '..'))
+
+    env_override = os.environ.get('SAFETY_GYM_LOCAL_PATH')
+    candidates = [
+        env_override,
+        os.path.join(workspace_root, 'SRL', 'safety-gymnasium-main'),
+        os.path.join(project_root, 'third_party', 'safety-gymnasium-main'),
+        os.path.join(project_root, 'external', 'safety-gymnasium-main'),
+    ]
+
+    return [path for path in candidates if path]
+
+
+def _ensure_local_sg_on_syspath() -> None:
+    for local_sg_path in _candidate_local_sg_paths():
+        if os.path.isdir(local_sg_path):
+            if local_sg_path in sys.path:
+                sys.path.remove(local_sg_path)
+            sys.path.insert(0, local_sg_path)
+            break
+
+
+# Always prioritize workspace safety-gymnasium source over site-packages.
+_ensure_local_sg_on_syspath()
+
 try:
     from safety_gymnasium.utils.registration import safe_registry
 except ImportError:
-    current_dir = os.path.dirname(__file__)
-    workspace_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
-    local_sg_path = os.path.join(workspace_root, 'SRL', 'safety-gymnasium-main')
-    if os.path.isdir(local_sg_path) and local_sg_path not in sys.path:
-        sys.path.insert(0, local_sg_path)
+    _ensure_local_sg_on_syspath()
     from safety_gymnasium.utils.registration import safe_registry
 
 

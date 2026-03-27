@@ -3,6 +3,7 @@
 本指南用于将当前项目从本地迁移到远程 Linux 服务器，并确保 CTCE + FSRL 训练与采集流程可复现。
 
 适用范围：
+
 - 项目目录：SafeTransfer/ma_safe_migration
 - 依赖本地源码：SRL/safety-gymnasium-main
 - 运行环境：Python 3.8 + Conda
@@ -17,7 +18,7 @@
 2. 可执行 FSRL 行为策略训练（CTCE 模式）。
 3. 可执行离线数据采集（FSRL checkpoint，CTCE Collector 模式）。
 4. 可将采集结果导出为 OSRL/DSRL 可读 NPZ 数据。
-4. 可稳定保存日志、checkpoint、离线数据。
+5. 可稳定保存日志、checkpoint、离线数据。
 
 ---
 
@@ -74,6 +75,7 @@ pip freeze > requirements_lock.txt
 ```
 
 原因：
+
 - 项目使用了 editable 安装（pip install -e ../SRL/safety-gymnasium-main）
 - 保持相对路径可减少脚本修改与路径错误
 
@@ -84,6 +86,7 @@ pip freeze > requirements_lock.txt
 ### 方案 A（推荐）：Git 仓库 + 服务器重建
 
 优点：
+
 - 干净、可追踪、便于后续更新
 
 流程：
@@ -137,6 +140,17 @@ conda activate SafeMARL
 python -m pip install --upgrade pip setuptools wheel
 ```
 
+建议使用双环境（完整流程更稳）：
+
+1. `SafeMARL`：环境验证、FSRL 训练/采样、OSRL 导出。
+2. `FISOR`：FISOR 离线训练（JAX 依赖隔离，避免与主环境冲突）。
+
+```bash
+conda create -n FISOR python=3.8 -y
+conda activate FISOR
+python -m pip install --upgrade pip setuptools wheel
+```
+
 ### 5.3 PyTorch
 
 CPU 版（更稳妥）：
@@ -156,6 +170,18 @@ pip install -r requirements.txt
 pip install -e ../SRL/safety-gymnasium-main
 pip install -e third_party/FSRL
 pip install -e third_party/DSRL
+pip install mujoco glfw xmltodict gymnasium-robotics
+```
+
+`FISOR` 环境建议单独安装（在同一目录执行）：
+
+```bash
+conda activate FISOR
+cd /workspace/SafeMARL/SafeTransfer/ma_safe_migration
+
+pip install -r requirements.txt
+pip install -e ../SRL/safety-gymnasium-main
+pip install -e third_party/FISOR
 pip install mujoco glfw xmltodict gymnasium-robotics
 ```
 
@@ -181,6 +207,7 @@ python verify_safety_gym_backend.py --num-agents 3 --steps 20 --render-mode rgb_
 ```
 
 通过标准：
+
 - 不报 ImportError / ModuleNotFoundError
 - 正常输出 rewards/costs 并完成 Verification completed
 
@@ -199,6 +226,7 @@ python third_party/FSRL/examples/customized/collect_dataset.py \
 ```
 
 通过标准：
+
 - 生成 `offline_dataset_ctce.hdf5`
 
 ### 6.3 CTCE FSRL 训练与采样验证
@@ -245,8 +273,34 @@ python third_party/OSRL/examples/tools/export_ctce_hdf5_to_osrl.py \
 ```
 
 通过标准：
+
 - 采样不报维度不匹配错误
 - 导出 `offline_dataset_osrl.npz` 与 `offline_dataset_osrl.meta.json`
+
+### 6.4 FISOR 离线训练验证（新增）
+
+先切换到 FISOR 环境：
+
+```bash
+conda activate FISOR
+cd /workspace/SafeMARL/SafeTransfer/ma_safe_migration/third_party/FISOR
+```
+
+执行训练：
+
+```bash
+python launcher/examples/train_offline.py \
+  --config configs/train_config.py:fisor \
+  --custom_env_name sg_ant_goal_n4 \
+  --num_agents 4 \
+  --dataset_path "/workspace/SafeMARL/SafeTransfer/ma_safe_migration/third_party/DSRL/processed/ctce_n4-120-951.hdf5" \
+  --experiment_name ctce_n4_fisor_remote
+```
+
+通过标准：
+
+- 不报模块导入错误与维度不匹配错误
+- 正常进入训练循环并输出 loss 日志
 
 ---
 
@@ -266,6 +320,7 @@ python third_party/FSRL/examples/customized/collect_dataset.py ... 2>&1 | tee co
 ```
 
 4. 建议定时备份：
+
 - third_party/FSRL/logs_local
 - data
 
@@ -276,6 +331,7 @@ python third_party/FSRL/examples/customized/collect_dataset.py ... 2>&1 | tee co
 ### 8.1 找不到 safety_gymnasium
 
 原因：
+
 - 未执行 editable 安装或路径错误
 
 检查：
@@ -302,6 +358,7 @@ pip install -e ../SRL/safety-gymnasium-main
 ### 8.3 FSRL checkpoint 维度不匹配
 
 典型原因：
+
 - 训练时和采样时 num_agents 不一致
 - ctce/per_agent 模式与 checkpoint 不匹配
 
@@ -316,7 +373,7 @@ pip install -e ../SRL/safety-gymnasium-main
 
 如果迁移后失败，按以下顺序回退：
 
-1. 切换到已验证提交（git checkout <commit>）
+1. 切换到已验证提交（git checkout `<commit>`）
 2. 重新创建 Conda 环境
 3. 按第 5 节完整重装依赖
 4. 从第 6 节重新做验证
@@ -494,3 +551,75 @@ git push
 
 1. GitHub 免费额度下 LFS 有容量和流量限制。
 2. 对大规模离线数据，仍建议走对象存储/网盘，不建议长期放 Git。
+
+---
+
+## 附录 B：本次 FISOR 架构改动后的迁移补充
+
+本次代码已将 CTCE 场景调整为：中心化 Critic + 分布式 Actor。
+
+实现要点：
+
+1. Critic 仍使用全局拼接观测与联合动作训练。
+2. Actor 使用共享参数的局部策略网络，按 agent 切片观测/动作训练。
+3. 推理时先独立生成局部动作，再拼接成联合动作，用中心化 Critic 打分筛选。
+
+迁移到服务器时请注意：
+
+1. 必须携带最新 FISOR 代码目录：
+
+- `SafeTransfer/ma_safe_migration/third_party/FISOR`
+
+2. 若采用 GitHub 托管迁移，建议按以下顺序：
+
+- 本地提交并 push。
+- 服务器 clone。
+- 创建新 Conda 环境并重装依赖。
+
+推荐命令（服务器）：
+
+```bash
+cd /workspace
+git clone https://github.com/<your_user>/<your_repo>.git
+cd <your_repo>/SafeTransfer/ma_safe_migration
+
+conda create -n SafeMARL python=3.8 -y
+conda activate SafeMARL
+python -m pip install --upgrade pip setuptools wheel
+
+conda create -n FISOR python=3.8 -y
+conda activate FISOR
+python -m pip install --upgrade pip setuptools wheel
+
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install -e ../../SRL/safety-gymnasium-main
+pip install -e third_party/FSRL
+pip install -e third_party/DSRL
+pip install mujoco glfw xmltodict gymnasium-robotics
+
+conda activate FISOR
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install -e ../../SRL/safety-gymnasium-main
+pip install -e third_party/FISOR
+pip install mujoco glfw xmltodict gymnasium-robotics
+
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+```
+
+迁移后快速验证（建议）：
+
+```bash
+python verify_safety_gym_backend.py --num-agents 4 --steps 20 --render-mode rgb_array --randomize-layout
+
+conda activate FISOR
+cd third_party/FISOR
+python launcher/examples/train_offline.py --config configs/train_config.py:fisor --custom_env_name sg_ant_goal_n4 --num_agents 4 --dataset_path "<your_dataset_path>.hdf5" --experiment_name ctce_n4
+```
+
+说明：
+
+1. CTCE 下入口脚本会自动启用分布式 Actor，不需要额外手动开关。
+2. 若出现维度不匹配，请优先检查 `--num_agents` 与数据集文件是否一致。

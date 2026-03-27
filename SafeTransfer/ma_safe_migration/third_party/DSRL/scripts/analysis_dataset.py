@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
             print(f"Total number of trajectories: {len(rew_ret)}")
 
-            plt.scatter(cost_ret, rew_ret, alpha=0.5,color='blue', edgecolors='w', s=50)
+            plt.scatter(cost_ret, rew_ret, alpha=1,color='blue', edgecolors='w', s=50)
             plt.xlabel("Costs Returns")
             plt.ylabel("Rewards Returns")
             output_path = os.path.join(dir_path, args.output)

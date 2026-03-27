@@ -109,6 +109,74 @@ python third_party/DSRL/scripts/process_dataset.py "./third_party/FSRL/logs_loca
 
 建议：先用该步骤检查轨迹 reward/cost 覆盖范围，再决定下游训练使用原始数据还是过滤后数据。
 
+### 6) 使用 FISOR 进行离线训练（中心化 Critic + 分布式 Actor）
+
+本节整合 `train_offline.py` 当前链路和最常用操作，适用于本地 HDF5 离线数据训练。
+
+#### 6.1 关键参数
+
+- `--config`：配置文件（默认可用 `configs/train_config.py:fisor`）。
+- `--dataset_path`：本地 HDF5 路径（传入后优先本地数据，不走远程 URL）。
+- `--custom_env_name`：环境名覆盖（支持 `sg_ant_goal_nN` 或 `SafetyAntMultiGoalN{N}-v0`）。
+- `--num_agents`：显式智能体数量（可选）。
+- `--ratio`：数据采样比例（降内存、做快速验证）。
+
+#### 6.2 当前训练链路
+
+1. 环境创建：
+   - `PointRobot` 走旧分支。
+   - 其他环境若检测到 CTCE 条件（环境名/数据名/num_agents 任一可解析）则走 CTCE 分支。
+2. 一致性校验：
+   - 会联合校验 `--num_agents`、`--custom_env_name` 中的 N、`--dataset_path` 文件名中的 `ctce_nN`。
+   - 三者冲突会直接报错并停止。
+3. 数据加载：
+   - 本地 HDF5 优先加载。
+   - 自动进行 obs/action shape 匹配检查与 rewards/costs/dones 维度规范化。
+4. 训练策略：
+   - 非 CTCE：`sample_jax()` + 周期评估。
+   - CTCE：`sample()`（numpy）降低设备内存压力，并默认跳过在线 `evaluate()`。
+
+#### 6.3 PowerShell 最小操作
+
+在 `third_party/FISOR` 目录执行：
+
+```powershell
+conda activate SafeMARL
+cd "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR"
+$env:XLA_PYTHON_CLIENT_PREALLOCATE="false"
+```
+
+标准离线训练（非 CTCE）：
+
+```powershell
+python launcher/examples/train_offline.py --env_id 0 --config configs/train_config.py:fisor
+```
+
+CTCE 离线训练（推荐显式参数）：
+
+```powershell
+python launcher/examples/train_offline.py `
+  --config configs/train_config.py:fisor `
+  --custom_env_name sg_ant_goal_n4 `
+  --num_agents 4 `
+  --dataset_path "D:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\DSRL\processed\ctce_n4-120-951.hdf5" `
+  --ratio 0.3 `
+  --project "ctce_debug" `
+  --experiment_name "ctce_n4_fisor"
+```
+
+#### 6.4 常见问题
+
+- `num_agents mismatch`：统一检查环境名 N、`--num_agents`、数据文件名中的 `ctce_nN`。
+- 显存/内存压力大：先降 `--ratio`，再降 batch（CTCE 已有 batch=256 保护）。
+- 导入错误版本 `safety_gymnasium`：优先在项目指定 conda 环境执行，避免 base 环境干扰。
+
+#### 6.5 最小自检
+
+- 控制台持续出现训练步进日志（非初始化后立即报错）。
+- `results/<group>/<experiment_name>/config.json` 生成。
+- wandb 可见 `train/*` 指标持续更新。
+
 ## 常用脚本
 
 - `verify_safety_gym_backend.py`：后端/渲染/step 验证
@@ -116,14 +184,42 @@ python third_party/DSRL/scripts/process_dataset.py "./third_party/FSRL/logs_loca
 - `third_party/FSRL/examples/customized/collect_dataset.py`：TRPOlag 训练与 CTCE 离线数据采集（唯一主入口）
 - `third_party/OSRL/examples/tools/export_ctce_hdf5_to_osrl.py`：导出 OSRL/DSRL 可消费 NPZ 数据
 
-历史入口说明：
-
-- `experiments/train_fsrl_behavior_on_safetransfer.py` 为旧训练脚本，后续将移除，不建议继续使用。
-
 ## 文档索引
 
 - `docs/PROJECT_STRUCTURE.md`：目录与模块职责
-- `docs/NEXT_STEPS.md`：CTCE 方案下的推进计划
+- `docs/FSRL_DSRL_OSRL_PIPELINE.md`：CTCE 数据采集到离线训练的数据管线
+- `docs/FISOR基线.md`：FISOR 理论拆解与 MA/CTDE 扩展设计
+
+## FISOR 集成放置建议
+
+为了与现有 FSRL/DSRL/OSRL 并行管理，并减少对上游镜像代码的污染，建议把 FISOR 仓库 clone 到：
+
+```bash
+third_party/FISOR/
+```
+
+理由：
+
+- 与 `third_party/FSRL`、`third_party/DSRL`、`third_party/OSRL` 同层，第三方基线管理方式一致。
+- 便于后续 pin commit、做补丁和复现实验。
+- 可直接复用当前 `data/`、`envs/`、`docs/` 的工程产物，不打散主仓库业务代码。
+
+## 目录冗余与命名决策
+
+- `safety-gymnasium-main` 不需要强制移入 `ma_safe_migration/`；只要环境里已正确安装 `safety_gymnasium` 包，脚本即可运行。
+- 为了兼容本地源码调试，适配器支持以下兜底路径：
+  - `SRL/safety-gymnasium-main`（当前默认历史布局）
+  - `third_party/safety-gymnasium-main`（可选同层布局）
+  - `external/safety-gymnasium-main`（可选改名布局）
+  - 或通过环境变量 `SAFETY_GYM_LOCAL_PATH` 指向任意本地源码路径
+- `third_party/` 目前建议保留命名；若改名，需要同步更新安装命令、训练命令与文档路径引用。
+
+## 查看训练情况：
+
+```bash
+tensorboard --logdir "D:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FSRL\logs_local" --port 6006
+然后浏览器打开
+```
 
 ## 下一步目标（offline训练）
 
@@ -135,6 +231,108 @@ python third_party/DSRL/scripts/process_dataset.py "./third_party/FSRL/logs_loca
 2. 建立统一评估口径：episode reward、episode cost、constraint violation rate。
 3. 先跑一个最小离线值分解基线，验证训练稳定性与可复现命令。
 4. 对比两组数据（原始 vs 过滤）对 offlineRLMARL 的影响。
+
+## 本次架构修改说明（中心化 Critic + 分布式 Actor）
+
+为降低 CTCE 下 actor 训练不稳定和不收敛风险，已在 FISOR 中完成如下改造：
+
+1. Critic 保持中心化：
+   - reward critic/value 继续使用全局拼接状态和联合动作。
+   - safety critic/value 继续使用全局拼接状态和联合动作。
+2. Actor 改为分布式：
+   - 一个共享参数的 diffusion actor，仅接收每个 agent 的局部观测切片，预测对应局部动作。
+   - 每条离线样本先由中心化 critic 计算全局安全-奖励权重，再广播到每个局部 actor 样本做加权行为克隆。
+3. 执行时动作生成：
+   - 每个 agent 用局部观测独立采样候选局部动作。
+   - 拼接成联合动作后，仍由中心化 critic 进行打分与筛选（maxq/minqc）。
+
+当前入口脚本已自动在 CTCE 模式启用该结构，无需额外命令参数：
+
+1. `third_party/FISOR/launcher/examples/train_offline.py`：CTCE 环境时自动传入 `decentralized_actor=True` 与 `num_agents`。
+2. `third_party/FISOR/jaxrl5/agents/fisor/fisor.py`：新增分布式 actor 切分训练与采样逻辑。
+3. `third_party/FISOR/configs/train_config.py`：增加 `decentralized_actor`、`num_agents` 配置项（默认兼容旧流程）。
+
+## GitHub 托管迁移到服务器（含环境配置）
+
+建议方式：本地提交到 GitHub，服务器直接 clone 后重建环境。
+
+### A. 本地提交到 GitHub
+
+1. 进入仓库根目录（建议 SafeMARL 作为根）。
+2. 提交并推送：
+
+```powershell
+git add .
+git commit -m "feat: centralized critic + decentralized actor for CTCE FISOR"
+git push
+```
+
+### B. 服务器拉取
+
+```bash
+cd /workspace
+git clone https://github.com/<your_user>/<your_repo>.git
+cd <your_repo>/SafeTransfer/ma_safe_migration
+```
+
+### C. 服务器环境配置（Ubuntu）
+
+1. 系统依赖：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  git build-essential cmake pkg-config \
+  libgl1-mesa-glx libgl1-mesa-dev libglew-dev libosmesa6-dev \
+  libglfw3 libglfw3-dev patchelf ffmpeg xvfb
+```
+
+2. Conda 环境：
+
+```bash
+conda create -n SafeMARL python=3.8 -y
+conda activate SafeMARL
+python -m pip install --upgrade pip setuptools wheel
+```
+
+3. PyTorch（CPU 稳妥版）：
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+4. 项目依赖：
+
+```bash
+pip install -r requirements.txt
+pip install -e ../../SRL/safety-gymnasium-main
+pip install -e third_party/FSRL
+pip install -e third_party/DSRL
+pip install -e third_party/FISOR
+pip install mujoco glfw xmltodict gymnasium-robotics
+```
+
+5. 无头渲染（建议写入 ~/.bashrc）：
+
+```bash
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+```
+
+### D. 迁移后最小验证
+
+1. 环境验证：
+
+```bash
+python verify_safety_gym_backend.py --num-agents 4 --steps 20 --render-mode rgb_array --randomize-layout
+```
+
+2. CTCE 离线训练（会自动启用中心化 critic + 分布式 actor）：
+
+```bash
+cd third_party/FISOR
+python launcher/examples/train_offline.py --config configs/train_config.py:fisor --custom_env_name sg_ant_goal_n4 --num_agents 4 --dataset_path "<your_dataset_path>.hdf5" --experiment_name ctce_n4
+```
 
 ## 可变多智能体环境创建示例
 

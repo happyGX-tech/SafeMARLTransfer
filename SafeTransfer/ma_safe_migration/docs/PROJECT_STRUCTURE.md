@@ -12,8 +12,7 @@
 ma_safe_migration/
 ├── envs/                        # 环境工厂、后端适配、FSRL 单智能体包装
 ├── migration/                   # 可变智能体策略网络与迁移组件
-├── experiments/                 # 历史实验脚本（逐步下线）
-├── docs/                        # 仅保留项目结构与下一步计划
+├── docs/                        # 项目结构、数据流程、FISOR 方案文档
 ├── third_party/                 # FSRL / DSRL / pyrallis（上游镜像）
 ├── verify_safety_gym_backend.py # 后端与渲染回归入口
 ├── test_environment.py          # 环境测试
@@ -29,11 +28,18 @@ ma_safe_migration/
 - `safety_gym_adapter.py`：`sg_ant_goal_n{N}` 与 `SafetyAntMultiGoalN{N}-v0` 映射与注册。
 - `fsrl_single_agent_wrapper.py`：把多智能体环境包装成 FSRL 可训练的单智能体接口。
 
-### experiments/
-
-- `train_fsrl_behavior_on_safetransfer.py`：历史训练入口（PPOLag），不再作为主流程（先）。
-
 ### third_party/
 
 - `FSRL/examples/customized/collect_dataset.py`：TRPOlag 训练与 CTCE 采集统一入口（支持 collect_only + checkpoint 采样）。
 - `OSRL/examples/tools/export_ctce_hdf5_to_osrl.py`：HDF5 转 NPZ 导出工具。
+
+## FISOR 放置建议
+
+- 推荐将 FISOR clone 在 `third_party/FISOR/`。
+- 建议保持“上游原仓 + 本地最小补丁”模式，避免改动扩散到 `envs/` 与数据管线主代码。
+
+## 目录命名与位置建议
+
+- `safety-gymnasium-main` 不要求必须移入 `ma_safe_migration/`；运行期核心依赖是已安装的 `safety_gymnasium` Python 包。
+- 当前适配器已支持多位置本地源码兜底：`SRL/safety-gymnasium-main`、`third_party/safety-gymnasium-main`、`external/safety-gymnasium-main`，并支持环境变量 `SAFETY_GYM_LOCAL_PATH` 覆盖。
+- `third_party/` 建议保留命名，不建议立即改名；它是行业常见第三方依赖目录语义，改名会增加文档、命令、脚本维护成本。

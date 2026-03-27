@@ -1,14 +1,18 @@
 ﻿import importlib
+import tempfile
 import os
 import signal
 import sys
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
+import h5py
 import pyrallis
 import torch
 from tianshou.data import ReplayBuffer, VectorReplayBuffer
+from tianshou.data.utils.converter import to_hdf5
 from tianshou.env import DummyVectorEnv, ShmemVectorEnv, SubprocVectorEnv
 from tianshou.utils.net.common import Net
 from tianshou.utils.net.continuous import ActorProb, Critic
@@ -53,6 +57,7 @@ class TrainCfg:
     policy_checkpoint: Optional[str] = None
     policy_device: Optional[str] = None
     dataset_name: str = "offline_dataset_ctce.hdf5"
+    dataset_append_mode: str = "shard"  # shard | merge
     output_dir: Optional[str] = None
 
     # buffer filter
@@ -72,14 +77,14 @@ class TrainCfg:
     hidden_sizes: Optional[Tuple[int, ...]] = None
     unbounded: bool = False
     last_layer_scale: bool = False
-    target_kl: float = 0.001
+    target_kl: float = 0.0005
     backtrack_coeff: float = 0.8
     max_backtracks: int = 10
     optim_critic_iters: int = 20
     gae_lambda: float = 0.95
     norm_adv: bool = True
     use_lagrangian: bool = True
-    lagrangian_pid: Tuple[float, ...] = (0.05, 0.005, 0.1)
+    lagrangian_pid: Tuple[float, ...] = (0.02, 0.0005, 0.02)
     rescaling: bool = True
     gamma: float = 0.99
     max_batchsize: int = 100000
@@ -89,8 +94,8 @@ class TrainCfg:
     action_bound_method: str = "clip"
 
     # trainer loop
-    episode_per_collect: int = 10
-    step_per_epoch: int = 10000
+    episode_per_collect: int = 20
+    step_per_epoch: int = 10000 # 用来控制epoch长度，单位是环境交互的step数
     repeat_per_collect: int = 4
     buffer_size: int = 100000
     training_num: int = 20
@@ -212,9 +217,13 @@ def _build_env_fn(args: TrainCfg):
     return _env_fn
 
 
-def _load_policy_checkpoint(policy, args: TrainCfg):
+def _load_policy_checkpoint(
+    policy,
+    args: TrainCfg,
+    optim: Optional[torch.optim.Optimizer] = None,
+) -> Dict[str, Any]:
     if not args.policy_checkpoint:
-        return
+        return {}
 
     checkpoint_obj = None
     if os.path.isdir(args.policy_checkpoint):
@@ -233,7 +242,14 @@ def _load_policy_checkpoint(policy, args: TrainCfg):
         state_dict = checkpoint_obj
 
     policy.load_state_dict(state_dict, strict=False)
+    if optim is not None and isinstance(checkpoint_obj, dict) and "optimizer" in checkpoint_obj:
+        try:
+            optim.load_state_dict(checkpoint_obj["optimizer"])
+            print("Loaded optimizer state from checkpoint.")
+        except Exception as e:
+            print(f"[Warn] Failed to load optimizer state: {e}")
     policy.eval()
+    return checkpoint_obj if isinstance(checkpoint_obj, dict) else {}
 
 
 def _validate_checkpoint_compatibility(args: TrainCfg, env) -> None:
@@ -309,11 +325,202 @@ def _resolve_logger_backend(args: TrainCfg) -> str:
     return "wandb" if has_wandb_key else "tensorboard"
 
 
+def _resolve_run_dir(args: TrainCfg) -> str:
+    return args.output_dir or os.path.join(args.logdir, args.name)
+
+
+def _default_checkpoint_path(args: TrainCfg) -> str:
+    return os.path.join(_resolve_run_dir(args), "checkpoint", "model.pt")
+
+
+def _copy_hdf5_node(src_node, dst_group, name: str) -> None:
+    src_node.file.copy(src_node.name, dst_group, name=name)
+
+
+def _merge_hdf5_dataset(old_ds, new_ds, dst_group, name: str, chunk_rows: int = 50000) -> None:
+    if old_ds.ndim != new_ds.ndim:
+        raise ValueError(f"Dataset ndim mismatch at '{name}': {old_ds.ndim} vs {new_ds.ndim}")
+    if old_ds.ndim == 0:
+        dst_group.create_dataset(name, data=old_ds[()])
+        return
+    if old_ds.shape[1:] != new_ds.shape[1:]:
+        raise ValueError(
+            f"Dataset shape mismatch at '{name}': {old_ds.shape} vs {new_ds.shape}"
+        )
+
+    old_n = int(old_ds.shape[0])
+    new_n = int(new_ds.shape[0])
+    total_n = old_n + new_n
+    dst_ds = dst_group.create_dataset(
+        name,
+        shape=(total_n,) + old_ds.shape[1:],
+        dtype=old_ds.dtype,
+        compression="gzip",
+        chunks=True,
+    )
+
+    for start in range(0, old_n, chunk_rows):
+        end = min(start + chunk_rows, old_n)
+        dst_ds[start:end] = old_ds[start:end]
+
+    for start in range(0, new_n, chunk_rows):
+        end = min(start + chunk_rows, new_n)
+        dst_ds[old_n + start:old_n + end] = new_ds[start:end]
+
+
+def _merge_hdf5_group(old_group, new_group, dst_group, path_prefix: str = "") -> None:
+    keys = sorted(set(old_group.keys()) | set(new_group.keys()))
+    for key in keys:
+        old_exists = key in old_group
+        new_exists = key in new_group
+        full_key = f"{path_prefix}/{key}" if path_prefix else key
+
+        if old_exists and not new_exists:
+            _copy_hdf5_node(old_group[key], dst_group, key)
+            continue
+        if new_exists and not old_exists:
+            _copy_hdf5_node(new_group[key], dst_group, key)
+            continue
+
+        old_node = old_group[key]
+        new_node = new_group[key]
+        if isinstance(old_node, h5py.Group) and isinstance(new_node, h5py.Group):
+            sub_group = dst_group.create_group(key)
+            _merge_hdf5_group(old_node, new_node, sub_group, full_key)
+            continue
+        if isinstance(old_node, h5py.Dataset) and isinstance(new_node, h5py.Dataset):
+            _merge_hdf5_dataset(old_node, new_node, dst_group, key)
+            continue
+
+        raise ValueError(f"HDF5 node type mismatch at '{full_key}'")
+
+
+def _append_to_existing_hdf5(dataset_path: str, new_data_batch) -> None:
+    dataset_dir = os.path.dirname(dataset_path)
+    temp_new_fd, temp_new_path = tempfile.mkstemp(
+        prefix="append_new_", suffix=".hdf5", dir=dataset_dir
+    )
+    os.close(temp_new_fd)
+    temp_merged_fd, temp_merged_path = tempfile.mkstemp(
+        prefix="append_merged_", suffix=".hdf5", dir=dataset_dir
+    )
+    os.close(temp_merged_fd)
+
+    try:
+        with h5py.File(temp_new_path, "w") as f_new:
+            to_hdf5(new_data_batch, f_new, compression="gzip")
+
+        with h5py.File(dataset_path, "r") as f_old, \
+             h5py.File(temp_new_path, "r") as f_new, \
+             h5py.File(temp_merged_path, "w") as f_merged:
+            _merge_hdf5_group(f_old, f_new, f_merged)
+
+        os.replace(temp_merged_path, dataset_path)
+    finally:
+        if os.path.exists(temp_new_path):
+            os.remove(temp_new_path)
+        if os.path.exists(temp_merged_path):
+            os.remove(temp_merged_path)
+
+
+def _build_shard_dataset_path(dataset_path: str) -> str:
+    stem, ext = os.path.splitext(dataset_path)
+    if not ext:
+        ext = ".hdf5"
+    timestamp = str(int(time.time() * 1000))
+    # Use pid to reduce collision risk if multiple runs write to same directory.
+    return f"{stem}.part_{os.getpid()}_{timestamp}{ext}"
+
+
+def _parse_progress_state(progress_path: str) -> Dict[str, float]:
+    if not os.path.isfile(progress_path):
+        return {}
+
+    with open(progress_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    if len(lines) < 2:
+        return {}
+
+    headers = lines[0].split("\t")
+    values = lines[-1].split("\t")
+    if len(headers) != len(values):
+        return {}
+
+    state: Dict[str, float] = {"_epochs": float(len(lines) - 1)}
+    for key, value in zip(headers, values):
+        try:
+            state[key] = float(value)
+        except ValueError:
+            continue
+    return state
+
+
 def _save_trajectory_buffer(traj_buffer: TrajectoryBuffer, args: TrainCfg) -> str:
-    dataset_dir = args.output_dir or os.path.join(args.logdir, args.name)
+    dataset_dir = _resolve_run_dir(args)
     os.makedirs(dataset_dir, exist_ok=True)
+    dataset_path = os.path.join(dataset_dir, args.dataset_name)
+
+    if args.resume and os.path.isfile(dataset_path):
+        if len(traj_buffer) == 0:
+            print(f"No new transitions collected, keep existing dataset: {dataset_path}")
+            return dataset_path
+
+        new_batch = traj_buffer.get_all()
+        if args.dataset_append_mode == "merge":
+            print(f"Appending new transitions to existing dataset: {dataset_path}")
+            _append_to_existing_hdf5(dataset_path, new_batch)
+            print(f"Finish appending dataset to {dataset_path}!")
+            return dataset_path
+
+        shard_path = _build_shard_dataset_path(dataset_path)
+        with h5py.File(shard_path, "w") as f:
+            to_hdf5(new_batch, f, compression="gzip")
+        print(
+            "Saved incremental dataset shard (fast mode). "
+            f"Base dataset: {dataset_path}, shard: {shard_path}"
+        )
+        return shard_path
+
     traj_buffer.save(dataset_dir, dataset_name=args.dataset_name)
-    return os.path.join(dataset_dir, args.dataset_name)
+    return dataset_path
+
+
+def _restore_trainer_resume_state(trainer, args: TrainCfg, checkpoint_meta: Dict[str, Any]) -> None:
+    if not args.resume:
+        return
+
+    restored = False
+    trainer_state = checkpoint_meta.get("trainer") if isinstance(checkpoint_meta, dict) else None
+    if isinstance(trainer_state, dict):
+        trainer.start_epoch = int(trainer_state.get("epoch", 0))
+        trainer.best_epoch = trainer.start_epoch
+        trainer.env_step = int(trainer_state.get("env_step", 0))
+        trainer.cum_episode = int(trainer_state.get("cum_episode", 0))
+        trainer.cum_cost = float(trainer_state.get("cum_cost", 0.0))
+        restored = True
+        print(
+            "Resumed trainer state from checkpoint: "
+            f"epoch={trainer.start_epoch}, env_step={trainer.env_step}, episodes={trainer.cum_episode}"
+        )
+
+    if not restored:
+        progress_path = os.path.join(_resolve_run_dir(args), "progress.txt")
+        progress_state = _parse_progress_state(progress_path)
+        if progress_state:
+            trainer.start_epoch = int(progress_state.get("_epochs", 0))
+            trainer.best_epoch = trainer.start_epoch
+            trainer.env_step = int(progress_state.get("Steps", 0))
+            trainer.cum_episode = int(progress_state.get("update/episode", 0))
+            trainer.cum_cost = float(progress_state.get("update/cum_cost", 0.0))
+            restored = True
+            print(
+                "Resumed trainer state from progress log: "
+                f"epoch={trainer.start_epoch}, env_step={trainer.env_step}, episodes={trainer.cum_episode}"
+            )
+
+    if not restored:
+        print("[Warn] resume=True but no checkpoint/progress state was found. Starting from epoch 1.")
 
 
 @pyrallis.wrap()
@@ -343,6 +550,14 @@ def train(args: TrainCfg):
         )
     if args.logdir is not None:
         args.logdir = os.path.join(args.logdir, args.project, args.group)
+    if args.resume and not args.policy_checkpoint:
+        auto_ckpt = _default_checkpoint_path(args)
+        if os.path.isfile(auto_ckpt):
+            args.policy_checkpoint = auto_ckpt
+            print(f"Auto resume checkpoint found: {auto_ckpt}")
+        else:
+            print(f"[Warn] resume=True but default checkpoint not found: {auto_ckpt}")
+    cfg = asdict(args)
     if logger_backend == "wandb":
         logger = WandbLogger(cfg, args.project, args.group, args.name, args.logdir)
     else:
@@ -425,7 +640,7 @@ def train(args: TrainCfg):
         action_space=env.action_space,
         lr_scheduler=None
     )
-    _load_policy_checkpoint(policy, args)
+    checkpoint_meta = _load_policy_checkpoint(policy, args, optim)
     _validate_checkpoint_compatibility(args, env)
 
     # collector
@@ -476,10 +691,24 @@ def train(args: TrainCfg):
     def stop_fn(reward, cost):
         return False
 
-    # def checkpoint_fn():
-    #     return {"model": policy.state_dict()}
-    # if args.save_ckpt:
-    #     logger.setup_checkpoint_fn(checkpoint_fn)
+    trainer = None
+
+    def checkpoint_fn():
+        payload = {
+            "model": policy.state_dict(),
+            "optimizer": optim.state_dict(),
+        }
+        if trainer is not None:
+            payload["trainer"] = {
+                "epoch": int(trainer.epoch),
+                "env_step": int(trainer.env_step),
+                "cum_episode": int(trainer.cum_episode),
+                "cum_cost": float(trainer.cum_cost),
+            }
+        return payload
+
+    if args.save_ckpt:
+        logger.setup_checkpoint_fn(checkpoint_fn)
 
     # trainer
     trainer = OnpolicyTrainer(
@@ -499,6 +728,7 @@ def train(args: TrainCfg):
         save_model_interval=args.save_interval,
         verbose=args.verbose,
     )
+    _restore_trainer_resume_state(trainer, args, checkpoint_meta)
 
     def saving_dataset():
         dataset_path = _save_trajectory_buffer(traj_buffer, args)
@@ -506,6 +736,8 @@ def train(args: TrainCfg):
 
     def term_handler(signum, frame):
         print("Sig term handler, saving the dataset...")
+        if args.save_ckpt:
+            logger.save_checkpoint(suffix="interrupt")
         saving_dataset()
         sys.exit(0)
 
@@ -523,9 +755,13 @@ def train(args: TrainCfg):
             logger.store(tab="train", cost_limit=cost, epoch=epoch)
     except KeyboardInterrupt:
         print("keyboardinterrupt detected, saving the dataset...")
+        if args.save_ckpt:
+            logger.save_checkpoint(suffix="interrupt")
         saving_dataset()
     except Exception as e:
         print(f"exception catched ({e}), saving the dataset...")
+        if args.save_ckpt:
+            logger.save_checkpoint(suffix="interrupt")
         saving_dataset()
 
     finally:

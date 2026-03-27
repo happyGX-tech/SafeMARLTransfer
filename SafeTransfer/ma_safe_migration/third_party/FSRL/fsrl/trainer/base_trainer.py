@@ -156,12 +156,15 @@ class BaseTrainer(ABC):
 
     def reset(self) -> None:
         """Initialize or reset the instance to yield a new iterator from zero."""
-        self.env_step = 0
-        # TODO
-        # if self.resume_from_log:
-        #     self.start_epoch, self.env_step = \
-        #         self.logger.restore_data()
-        #     self.best_epoch = self.start_epoch
+        if not (self.resume_from_log and self.env_step > 0):
+            self.env_step = 0
+        if self.resume_from_log and self.env_step == 0:
+            try:
+                restored = self.logger.restore_data()
+                if isinstance(restored, tuple) and len(restored) >= 2:
+                    self.env_step = int(restored[1])
+            except Exception:
+                pass
 
         self.start_time = time.time()
 
