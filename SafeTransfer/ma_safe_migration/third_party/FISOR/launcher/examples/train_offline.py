@@ -9,9 +9,8 @@ import numpy as np
 
 warnings.filterwarnings(
     'ignore',
-    message=r'WARN: Overriding environment .* already in registry',
+    message=r'.*Overriding environment .* already in registry.*',
     category=UserWarning,
-    module=r'gymnasium\.envs\.registration',
 )
 
 # Avoid JAX pre-allocating most memory on startup.
