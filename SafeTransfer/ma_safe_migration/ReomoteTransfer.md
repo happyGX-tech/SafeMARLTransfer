@@ -76,7 +76,7 @@ pip freeze > requirements_lock.txt
 
 原因：
 
-- 项目使用了 editable 安装（pip install -e ../SRL/safety-gymnasium-main）
+- 项目使用了 editable 安装（pip install -e ../../SRL/safety-gymnasium-main）
 - 保持相对路径可减少脚本修改与路径错误
 
 ---
@@ -132,57 +132,55 @@ sudo apt-get install -y \
   libglfw3 libglfw3-dev patchelf ffmpeg xvfb
 ```
 
-### 5.2 Conda 环境
+### 5.2 Conda 环境（推荐双环境）
+
+用途划分：
+
+1. `SafeMARL`：环境验证、FSRL/OSRL/DSRL。
+2. `FISOR`：FISOR 离线训练（JAX 依赖隔离）。
 
 ```bash
 conda create -n SafeMARL python=3.8 -y
-conda activate SafeMARL
-python -m pip install --upgrade pip setuptools wheel
-```
-
-建议使用双环境（完整流程更稳）：
-
-1. `SafeMARL`：环境验证、FSRL 训练/采样、OSRL 导出。
-2. `FISOR`：FISOR 离线训练（JAX 依赖隔离，避免与主环境冲突）。
-
-```bash
 conda create -n FISOR python=3.8 -y
-conda activate FISOR
-python -m pip install --upgrade pip setuptools wheel
+conda env list
 ```
 
-### 5.3 PyTorch
-
-CPU 版（更稳妥）：
-
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
-
-如果是 NVIDIA GPU，按驱动和 CUDA 版本改为对应源。
-
-### 5.4 项目依赖安装
+### 5.3 依赖安装（按环境分开）
 
 ```bash
 cd /workspace/SafeMARL/SafeTransfer/ma_safe_migration
 
+# ---------- A. SafeMARL ----------
+conda activate SafeMARL
+python -m pip install --upgrade pip setuptools wheel
+# CPU:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CUDA(示例 cu121):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-pip install -e ../SRL/safety-gymnasium-main
+pip install -e ../../SRL/safety-gymnasium-main
 pip install -e third_party/FSRL
 pip install -e third_party/DSRL
 pip install mujoco glfw xmltodict gymnasium-robotics
-```
 
-`FISOR` 环境建议单独安装（在同一目录执行）：
-
-```bash
+# ---------- B. FISOR ----------
 conda activate FISOR
-cd /workspace/SafeMARL/SafeTransfer/ma_safe_migration
-
+python -m pip install --upgrade pip setuptools wheel
+# CPU:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CUDA(示例 cu121):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-pip install -e ../SRL/safety-gymnasium-main
+pip install -e ../../SRL/safety-gymnasium-main
 pip install -e third_party/FISOR
 pip install mujoco glfw xmltodict gymnasium-robotics
+```
+
+### 5.4 GPU 与渲染配置
+
+```bash
+nvidia-smi
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 ```
 
 ### 5.5 无头服务器渲染变量（推荐）
@@ -344,7 +342,7 @@ pip show safety-gymnasium
 
 ```bash
 cd /workspace/SafeMARL/SafeTransfer/ma_safe_migration
-pip install -e ../SRL/safety-gymnasium-main
+pip install -e ../../SRL/safety-gymnasium-main
 ```
 
 ### 8.2 MuJoCo/渲染报错
@@ -584,26 +582,35 @@ git clone https://github.com/<your_user>/<your_repo>.git
 cd <your_repo>/SafeTransfer/ma_safe_migration
 
 conda create -n SafeMARL python=3.8 -y
+conda create -n FISOR python=3.8 -y
+
+# A. SafeMARL
 conda activate SafeMARL
 python -m pip install --upgrade pip setuptools wheel
-
-conda create -n FISOR python=3.8 -y
-conda activate FISOR
-python -m pip install --upgrade pip setuptools wheel
-
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CPU:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CUDA(示例 cu121):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 pip install -e ../../SRL/safety-gymnasium-main
 pip install -e third_party/FSRL
 pip install -e third_party/DSRL
 pip install mujoco glfw xmltodict gymnasium-robotics
 
+# B. FISOR
 conda activate FISOR
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+python -m pip install --upgrade pip setuptools wheel
+# CPU:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CUDA(示例 cu121):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 pip install -e ../../SRL/safety-gymnasium-main
 pip install -e third_party/FISOR
 pip install mujoco glfw xmltodict gymnasium-robotics
+
+nvidia-smi
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
