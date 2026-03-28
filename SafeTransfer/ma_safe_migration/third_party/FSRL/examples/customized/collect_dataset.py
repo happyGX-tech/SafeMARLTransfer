@@ -129,7 +129,7 @@ class ActorProbLargeVar(ActorProb):
         self,
         obs,
         state: Any = None,
-        info: Dict[str, Any] = {},
+        info: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Any]:
         """Mapping: obs -> logits -> (mu, sigma)."""
         logits, hidden = self.preprocess(obs, state)
@@ -144,7 +144,7 @@ class ActorProbLargeVar(ActorProb):
             shape = [1] * len(mu.shape)
             shape[1] = -1
             sigma = (self.sigma_param.view(shape) + torch.zeros_like(mu)).exp()
-        return (mu, sigma), state
+        return (mu, sigma), hidden
 
 
 def cost_limit_scheduler(epoch, epoch_start, epoch_end, cost_start, cost_end):
