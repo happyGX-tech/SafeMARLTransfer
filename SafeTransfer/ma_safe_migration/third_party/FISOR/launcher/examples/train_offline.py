@@ -4,7 +4,15 @@ sys.path.append('.')
 import random
 import re
 import importlib
+import warnings
 import numpy as np
+
+warnings.filterwarnings(
+    'ignore',
+    message=r'WARN: Overriding environment .* already in registry',
+    category=UserWarning,
+    module=r'gymnasium\.envs\.registration',
+)
 
 # Avoid JAX pre-allocating most memory on startup.
 os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
