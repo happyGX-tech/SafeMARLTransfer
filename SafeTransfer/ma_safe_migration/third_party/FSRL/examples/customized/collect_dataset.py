@@ -135,7 +135,12 @@ class ActorProbLargeVar(ActorProb):
         logits, hidden = self.preprocess(obs, state)
         mu = self.mu(logits)
         if not self._unbounded:
-            mu = self._max * torch.tanh(mu)
+            # Be compatible with different tianshou versions:
+            # some versions store action scale as _max, others as max_action.
+            action_scale = getattr(self, "_max", None)
+            if action_scale is None:
+                action_scale = getattr(self, "max_action", None)
+            mu = torch.tanh(mu) if action_scale is None else action_scale * torch.tanh(mu)
         if self._c_sigma:
             sigma = torch.clamp(
                 self.sigma(logits), min=self.SIGMA_MIN, max=self.SIGMA_MAX
