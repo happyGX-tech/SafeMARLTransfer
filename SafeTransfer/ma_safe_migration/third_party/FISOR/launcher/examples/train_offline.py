@@ -6,6 +6,7 @@ import re
 import importlib
 import warnings
 import numpy as np
+import jax
 
 warnings.filterwarnings(
     'ignore',
@@ -161,9 +162,35 @@ def _make_env(details, local_dataset_path):
     return env, True
 
 
+def _to_wandb_log(prefix, info, step):
+    payload = {"global_step": int(step)}
+    for key, value in info.items():
+        # Ensure W&B receives JSON-serializable scalar metrics.
+        try:
+            if isinstance(value, (jax.Array, np.ndarray)):
+                if np.asarray(value).size == 1:
+                    payload[f"{prefix}/{key}"] = float(np.asarray(value).reshape(()))
+            elif np.isscalar(value):
+                payload[f"{prefix}/{key}"] = float(value)
+        except Exception:
+            continue
+    return payload
+
+
 def call_main(details):
     details['agent_kwargs']['cost_scale'] = details['dataset_kwargs']['cost_scale']
-    wandb.init(project=details['project'], name=details['experiment_name'], group=details['group'], config=details['agent_kwargs'])
+    result_dir = details.get('result_dir', f"./results/{details['group']}/{details['experiment_name']}")
+    wandb.init(
+        project=details['project'],
+        name=details['experiment_name'],
+        group=details['group'],
+        config=to_dict(details),
+        dir=result_dir,
+    )
+    wandb.define_metric('global_step')
+    wandb.define_metric('train/*', step_metric='global_step')
+    wandb.define_metric('eval/*', step_metric='global_step')
+    wandb.define_metric('checkpoint/*', step_metric='global_step')
     local_dataset_path = details['dataset_kwargs'].get('local_hdf5_path', '')
 
     if details['env_name'] == 'PointRobot':
@@ -216,6 +243,7 @@ def call_main(details):
 
 
     save_time = 1
+    checkpoint_interval = int(details.get('eval_interval', 0))
     for i in trange(details['max_steps'], smoothing=0.1, desc=details['experiment_name']):
         if is_ctce_env:
             sample = ds.sample(details['batch_size'])
@@ -224,19 +252,32 @@ def call_main(details):
         agent, info = agent.update(sample)
         
         if i % details['log_interval'] == 0:
-            wandb.log({f"train/{k}": v for k, v in info.items()}, step=i)
+            wandb.log(_to_wandb_log('train', info, i), step=i)
 
-        # if i % details['eval_interval'] == 0 and i > 0:
-        if (not is_ctce_env) and i % details['eval_interval'] == 0:
-            agent.save(f"./results/{details['group']}/{details['experiment_name']}", save_time)
+        if checkpoint_interval > 0 and i > 0 and i % checkpoint_interval == 0:
+            agent.save(result_dir, save_time)
+            wandb.log(
+                {
+                    'global_step': int(i),
+                    'checkpoint/save_index': int(save_time),
+                },
+                step=i,
+            )
             save_time += 1
+
+        if (not is_ctce_env) and i % details['eval_interval'] == 0:
             if details['env_name'] == 'PointRobot':
                 eval_info = evaluate_pr(agent, env, details['eval_episodes'])
             else:
                 eval_info = evaluate(agent, env, details['eval_episodes'])
             if details['env_name'] != 'PointRobot' and hasattr(env, 'get_normalized_score'):
                 eval_info["normalized_return"], eval_info["normalized_cost"] = env.get_normalized_score(eval_info["return"], eval_info["cost"])
-            wandb.log({f"eval/{k}": v for k, v in eval_info.items()}, step=i)
+            wandb.log(_to_wandb_log('eval', eval_info, i), step=i)
+
+    # Always save a final checkpoint, including CTCE runs.
+    agent.save(result_dir, save_time)
+    wandb.log({'global_step': int(details['max_steps']), 'checkpoint/final_index': int(save_time)}, step=details['max_steps'])
+    wandb.finish()
 
 
 def main(_):
@@ -269,9 +310,11 @@ def main(_):
 
     print(parameters)
 
-    if not os.path.exists(f"./results/{parameters['group']}/{parameters['experiment_name']}"):
-        os.makedirs(f"./results/{parameters['group']}/{parameters['experiment_name']}")
-    with open(f"./results/{parameters['group']}/{parameters['experiment_name']}/config.json", "w") as f:
+    run_result_dir = f"./results/{parameters['group']}/{parameters['experiment_name']}"
+    parameters['result_dir'] = run_result_dir
+    if not os.path.exists(run_result_dir):
+        os.makedirs(run_result_dir)
+    with open(f"{run_result_dir}/config.json", "w") as f:
         json.dump(to_dict(parameters), f, indent=4)
     
     call_main(parameters)

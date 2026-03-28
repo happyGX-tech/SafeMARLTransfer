@@ -64,7 +64,7 @@ pip install -e third_party/DSRL
 pip install mujoco glfw xmltodict gymnasium-robotics
 ```
 
-### 3.4 安装 `FISOR` 依赖（离线训练）
+### 3.4 安装 `FISOR` 依赖（离线训练）具体请参考FISOR安装目录
 
 ```bash
 conda activate FISOR
@@ -78,7 +78,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 pip install -r requirements.txt
 pip install -e ../../SRL/safety-gymnasium-main
-pip install -e third_party/FISOR
+#这里的环境配置有问题，需要修改
 pip install mujoco glfw xmltodict gymnasium-robotics
 ```
 
