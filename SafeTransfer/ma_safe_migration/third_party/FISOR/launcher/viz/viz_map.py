@@ -117,6 +117,18 @@ def _make_env(cfg):
     )
     return env, True
 
+
+def _resolve_model_location(flag_value):
+    if flag_value:
+        return os.path.abspath(flag_value)
+    env_value = os.environ.get('MODEL_LOCATION', '')
+    if env_value:
+        return os.path.abspath(env_value)
+    cwd = os.getcwd()
+    if os.path.exists(os.path.join(cwd, 'config.json')):
+        return os.path.abspath(cwd)
+    return ''
+
 hazard_position_list = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
 
 label_size = 18
@@ -323,6 +335,16 @@ def plot_ctce_value_slice(env, agent, model_location, x_index, y_index, span, gr
 
 def load_diffusion_model(model_location):
 
+    if model_location == '':
+        raise ValueError(
+            '--model_location is required. '
+            'You can pass --model_location, or set MODEL_LOCATION, '
+            'or run this script inside a directory containing config.json.'
+        )
+
+    if not os.path.exists(os.path.join(model_location, 'config.json')):
+        raise FileNotFoundError(f'config.json not found in {model_location}')
+
     with open(os.path.join(model_location, 'config.json'), 'r') as file:
         cfg = to_config_dict(json.load(file))
 
@@ -360,12 +382,13 @@ def load_diffusion_model(model_location):
     return env, new_agent, cfg, is_ctce
 
 def main(_):
-    env, diffusion_agent, cfg, is_ctce = load_diffusion_model(FLAGS.model_location)
+    model_location = _resolve_model_location(FLAGS.model_location)
+    env, diffusion_agent, cfg, is_ctce = load_diffusion_model(model_location)
     if is_ctce or _infer_num_agents_from_env_name(cfg.get('env_name', '')) is not None:
         out_path = plot_ctce_value_slice(
             env,
             diffusion_agent,
-            FLAGS.model_location,
+            model_location,
             int(FLAGS.x_index),
             int(FLAGS.y_index),
             float(FLAGS.span),
@@ -373,8 +396,8 @@ def main(_):
         )
         print(f'Saved CTCE value slice to: {out_path}')
     else:
-        plot_pic(env, diffusion_agent, FLAGS.model_location)
-        print(f"Saved PointRobot map to: {os.path.join(FLAGS.model_location, 'imgs', 'viz_map.png')}")
+        plot_pic(env, diffusion_agent, model_location)
+        print(f"Saved PointRobot map to: {os.path.join(model_location, 'imgs', 'viz_map.png')}")
     env.close()
 
 

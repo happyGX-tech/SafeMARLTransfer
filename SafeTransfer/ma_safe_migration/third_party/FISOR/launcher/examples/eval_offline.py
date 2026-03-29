@@ -10,6 +10,7 @@ from absl import app, flags
 from ml_collections import ConfigDict
 import gymnasium as gym
 import wandb
+from wandb.errors import CommError
 
 from jaxrl5.agents import FISOR
 from jaxrl5.evaluation import evaluate, evaluate_pr
@@ -167,11 +168,53 @@ def _evaluate_one(agent, env, env_name, eval_episodes, render):
     return evaluate(agent, env, eval_episodes, render=render)
 
 
-def main(_):
-    if FLAGS.model_location == '':
-        raise ValueError('--model_location is required')
+def _init_wandb_with_fallback(wandb_kwargs):
+    try:
+        return wandb.init(**wandb_kwargs)
+    except CommError as exc:
+        message = str(exc)
+        # Common failure: invalid entity/team name.
+        if 'entity' in message.lower() and 'not found' in message.lower() and 'entity' in wandb_kwargs:
+            bad_entity = wandb_kwargs.get('entity', '')
+            print(f"[wandb] entity '{bad_entity}' not found. Retrying without entity...")
+            retry_kwargs = dict(wandb_kwargs)
+            retry_kwargs.pop('entity', None)
+            try:
+                return wandb.init(**retry_kwargs)
+            except CommError as exc2:
+                print(f"[wandb] Retry without entity failed: {exc2}")
+                print('[wandb] Falling back to offline mode.')
+                retry_kwargs['mode'] = 'offline'
+                return wandb.init(**retry_kwargs)
+        print(f"[wandb] Init failed: {exc}")
+        print('[wandb] Falling back to offline mode.')
+        retry_kwargs = dict(wandb_kwargs)
+        retry_kwargs['mode'] = 'offline'
+        retry_kwargs.pop('entity', None)
+        return wandb.init(**retry_kwargs)
 
-    model_location = os.path.abspath(FLAGS.model_location)
+
+def _resolve_model_location(flag_value):
+    if flag_value:
+        return os.path.abspath(flag_value)
+    env_value = os.environ.get('MODEL_LOCATION', '')
+    if env_value:
+        return os.path.abspath(env_value)
+    cwd = os.getcwd()
+    if os.path.exists(os.path.join(cwd, 'config.json')):
+        return os.path.abspath(cwd)
+    return ''
+
+
+def main(_):
+    model_location = _resolve_model_location(FLAGS.model_location)
+    if model_location == '':
+        raise ValueError(
+            '--model_location is required. '\
+            'You can pass --model_location, or set MODEL_LOCATION, '\
+            'or run this script inside a directory containing config.json.'
+        )
+
     config_path = os.path.join(model_location, 'config.json')
     if not os.path.exists(config_path):
         raise FileNotFoundError(f'config.json not found in {model_location}')
@@ -199,7 +242,7 @@ def main(_):
     if FLAGS.wandb_entity:
         wandb_kwargs['entity'] = FLAGS.wandb_entity
 
-    wandb.init(**wandb_kwargs)
+    _init_wandb_with_fallback(wandb_kwargs)
 
     env, _ = _make_env(cfg)
     base_agent = _create_agent(cfg, env)
