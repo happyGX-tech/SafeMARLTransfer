@@ -37,9 +37,12 @@ flags.DEFINE_integer('env_id', 30, 'Choose env')
 flags.DEFINE_float('ratio', 1.0, 'dataset ratio')
 flags.DEFINE_string('project', '', 'project name for wandb')
 flags.DEFINE_string('experiment_name', '', 'experiment name for wandb')
+flags.DEFINE_string('wandb_entity', '', 'Optional wandb entity/team name')
+flags.DEFINE_string('wandb_mode', 'online', 'wandb mode: online/offline/disabled')
 flags.DEFINE_string('dataset_path', '', 'Optional local HDF5 dataset path to bypass URL loading')
 flags.DEFINE_string('custom_env_name', '', 'Optional env name override, e.g. sg_ant_goal_n4 or SafetyAntMultiGoalN4-v0')
 flags.DEFINE_integer('num_agents', -1, 'Optional explicit num_agents for variable-agent CTCE datasets')
+flags.DEFINE_integer('save_interval', 0, 'Optional checkpoint save interval in steps. If <=0, fallback to eval_interval.')
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -180,17 +183,25 @@ def _to_wandb_log(prefix, info, step):
 def call_main(details):
     details['agent_kwargs']['cost_scale'] = details['dataset_kwargs']['cost_scale']
     result_dir = details.get('result_dir', f"./results/{details['group']}/{details['experiment_name']}")
+    project_name = details.get('project', '') or 'FISOR'
+    wandb_kwargs = {
+        'project': project_name,
+        'name': details['experiment_name'],
+        'group': details['group'],
+        'config': to_dict(details),
+        'dir': result_dir,
+        'mode': details.get('wandb_mode', 'online'),
+    }
+    if details.get('wandb_entity', ''):
+        wandb_kwargs['entity'] = details['wandb_entity']
     wandb.init(
-        project=details['project'],
-        name=details['experiment_name'],
-        group=details['group'],
-        config=to_dict(details),
-        dir=result_dir,
+        **wandb_kwargs,
     )
     wandb.define_metric('global_step')
     wandb.define_metric('train/*', step_metric='global_step')
     wandb.define_metric('eval/*', step_metric='global_step')
     wandb.define_metric('checkpoint/*', step_metric='global_step')
+    wandb.log({'global_step': 0, 'runtime/initialized': 1.0}, step=0)
     local_dataset_path = details['dataset_kwargs'].get('local_hdf5_path', '')
 
     if details['env_name'] == 'PointRobot':
@@ -243,49 +254,69 @@ def call_main(details):
 
 
     save_time = 1
-    checkpoint_interval = int(details.get('eval_interval', 0))
-    for i in trange(details['max_steps'], smoothing=0.1, desc=details['experiment_name']):
-        if is_ctce_env:
-            sample = ds.sample(details['batch_size'])
-        else:
-            sample = ds.sample_jax(details['batch_size'])
-        agent, info = agent.update(sample)
-        
-        if i % details['log_interval'] == 0:
-            wandb.log(_to_wandb_log('train', info, i), step=i)
+    checkpoint_interval = int(details.get('save_interval', details.get('eval_interval', 0)))
+    interrupted = False
+    last_step = 0
 
-        if checkpoint_interval > 0 and i > 0 and i % checkpoint_interval == 0:
-            agent.save(result_dir, save_time)
-            wandb.log(
-                {
-                    'global_step': int(i),
-                    'checkpoint/save_index': int(save_time),
-                },
-                step=i,
-            )
-            save_time += 1
-
-        if (not is_ctce_env) and i % details['eval_interval'] == 0:
-            if details['env_name'] == 'PointRobot':
-                eval_info = evaluate_pr(agent, env, details['eval_episodes'])
+    try:
+        for i in trange(details['max_steps'], smoothing=0.1, desc=details['experiment_name']):
+            last_step = int(i)
+            if is_ctce_env:
+                sample = ds.sample(details['batch_size'])
             else:
-                eval_info = evaluate(agent, env, details['eval_episodes'])
-            if details['env_name'] != 'PointRobot' and hasattr(env, 'get_normalized_score'):
-                eval_info["normalized_return"], eval_info["normalized_cost"] = env.get_normalized_score(eval_info["return"], eval_info["cost"])
-            wandb.log(_to_wandb_log('eval', eval_info, i), step=i)
+                sample = ds.sample_jax(details['batch_size'])
+            agent, info = agent.update(sample)
+            
+            if i % details['log_interval'] == 0:
+                wandb.log(_to_wandb_log('train', info, i), step=i)
 
-    # Always save a final checkpoint, including CTCE runs.
-    agent.save(result_dir, save_time)
-    wandb.log({'global_step': int(details['max_steps']), 'checkpoint/final_index': int(save_time)}, step=details['max_steps'])
-    wandb.finish()
+            if checkpoint_interval > 0 and i > 0 and i % checkpoint_interval == 0:
+                agent.save(result_dir, save_time)
+                wandb.log(
+                    {
+                        'global_step': int(i),
+                        'checkpoint/save_index': int(save_time),
+                    },
+                    step=i,
+                )
+                save_time += 1
+
+            if (not is_ctce_env) and i % details['eval_interval'] == 0:
+                if details['env_name'] == 'PointRobot':
+                    eval_info = evaluate_pr(agent, env, details['eval_episodes'])
+                else:
+                    eval_info = evaluate(agent, env, details['eval_episodes'])
+                if details['env_name'] != 'PointRobot' and hasattr(env, 'get_normalized_score'):
+                    eval_info["normalized_return"], eval_info["normalized_cost"] = env.get_normalized_score(eval_info["return"], eval_info["cost"])
+                wandb.log(_to_wandb_log('eval', eval_info, i), step=i)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[INFO] KeyboardInterrupt received. Saving interruption checkpoint...")
+    finally:
+        final_step = int(last_step if interrupted else details['max_steps'])
+        agent.save(result_dir, save_time)
+        wandb.log(
+            {
+                'global_step': final_step,
+                'checkpoint/final_index': int(save_time),
+                'checkpoint/interrupted': int(interrupted),
+            },
+            step=final_step,
+        )
+        wandb.finish()
 
 
 def main(_):
     parameters = FLAGS.config
     if FLAGS.project != '':
         parameters['project'] = FLAGS.project
+    if FLAGS.wandb_entity != '':
+        parameters['wandb_entity'] = FLAGS.wandb_entity
+    parameters['wandb_mode'] = FLAGS.wandb_mode
     parameters['env_name'] = FLAGS.custom_env_name if FLAGS.custom_env_name != '' else env_list[FLAGS.env_id]
     parameters['ratio'] = FLAGS.ratio
+    if FLAGS.save_interval > 0:
+        parameters['save_interval'] = FLAGS.save_interval
     if FLAGS.num_agents > 0:
         parameters['dataset_kwargs']['num_agents'] = FLAGS.num_agents
     if FLAGS.dataset_path != '':

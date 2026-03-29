@@ -4,8 +4,10 @@ sys.path.append('.')
 from absl import app, flags
 import re
 import json
+import importlib
 import numpy as np
-from ml_collections import config_flags, ConfigDict
+import gymnasium as gym
+from ml_collections import ConfigDict
 import matplotlib.pyplot as plt
 from matplotlib import colors
 import jax
@@ -14,13 +16,106 @@ from jaxrl5.agents import FISOR
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('model_location', '', 'model location for point robot model')
+flags.DEFINE_string('model_location', '', 'Model directory containing config.json and model*.pickle')
+flags.DEFINE_string('model_file', '', 'Optional explicit model file path. If empty, use latest checkpoint')
+flags.DEFINE_integer('seed', 0, 'Seed used for environment reset in visualization')
+flags.DEFINE_integer('x_index', 0, 'Observation index used as x-axis in CTCE value slice')
+flags.DEFINE_integer('y_index', 1, 'Observation index used as y-axis in CTCE value slice')
+flags.DEFINE_float('span', 3.0, 'Half width of visualization range [-span, span] for CTCE value slice')
+flags.DEFINE_integer('grid_size', 121, 'Grid size for CTCE value slice visualization')
 
 
 def to_config_dict(d):
     if isinstance(d, dict):
         return ConfigDict({k: to_config_dict(v) for k, v in d.items()})
     return d
+
+
+def _infer_num_agents_from_env_name(env_name):
+    if not env_name:
+        return None
+    for pattern in (r'sg_ant_goal_n(\d+)', r'SafetyAntMultiGoalN(\d+)-v0'):
+        match = re.fullmatch(pattern, env_name)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _infer_num_agents_from_dataset_path(dataset_path):
+    if not dataset_path:
+        return None
+    basename = os.path.basename(dataset_path)
+    match = re.search(r'ctce_n(\d+)', basename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _resolve_ctce_num_agents(cfg):
+    dataset_path = cfg.get('dataset_kwargs', {}).get('local_hdf5_path', '')
+    explicit_num_agents = int(cfg.get('dataset_kwargs', {}).get('num_agents', -1) or -1)
+    env_name_num_agents = _infer_num_agents_from_env_name(cfg.get('env_name', ''))
+    dataset_num_agents = _infer_num_agents_from_dataset_path(dataset_path)
+    if explicit_num_agents > 0:
+        return explicit_num_agents
+    if env_name_num_agents is not None:
+        return env_name_num_agents
+    if dataset_num_agents is not None:
+        return dataset_num_agents
+    return None
+
+
+def _prefer_local_safety_gymnasium(project_root):
+    workspace_root = os.path.abspath(os.path.join(project_root, '..', '..'))
+    candidates = [
+        os.environ.get('SAFETY_GYM_LOCAL_PATH', ''),
+        os.path.join(workspace_root, 'SRL', 'safety-gymnasium-main'),
+        os.path.join(project_root, 'third_party', 'safety-gymnasium-main'),
+        os.path.join(project_root, 'external', 'safety-gymnasium-main'),
+    ]
+    local_path = next((p for p in candidates if p and os.path.isdir(p)), None)
+    if local_path is None:
+        return
+
+    os.environ['SAFETY_GYM_LOCAL_PATH'] = local_path
+    if local_path in sys.path:
+        sys.path.remove(local_path)
+    sys.path.insert(0, local_path)
+
+    stale_modules = [m for m in list(sys.modules.keys()) if m == 'safety_gymnasium' or m.startswith('safety_gymnasium.')]
+    for module_name in stale_modules:
+        del sys.modules[module_name]
+
+    importlib.invalidate_caches()
+
+
+def _make_env(cfg):
+    env_name = cfg.get('env_name', 'PointRobot')
+    if env_name == 'PointRobot':
+        return PointRobot(id=0, seed=int(FLAGS.seed)), False
+
+    if _infer_num_agents_from_env_name(env_name) is None:
+        return gym.make(env_name), False
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..', '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    _prefer_local_safety_gymnasium(project_root)
+
+    from envs.fsrl_single_agent_wrapper import FSRLCTCESingleAgentEnv
+
+    num_agents = _resolve_ctce_num_agents(cfg)
+    if num_agents is None:
+        raise ValueError('Cannot resolve num_agents for CTCE visualization.')
+
+    env = FSRLCTCESingleAgentEnv(
+        num_agents=int(num_agents),
+        backend='safety_gym',
+        env_id=env_name,
+        strict_mujoco_consistency=False,
+    )
+    return env, True
 
 hazard_position_list = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
 
@@ -187,12 +282,51 @@ def plot_pic(env, agent, model_location):
     plt.savefig(f"{model_location}/imgs/viz_map.png", dpi=600)
 
 
+def plot_ctce_value_slice(env, agent, model_location, x_index, y_index, span, grid_size):
+    obs, _ = env.reset(seed=int(FLAGS.seed))
+    obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+    obs_dim = obs.shape[0]
+
+    if not (0 <= x_index < obs_dim and 0 <= y_index < obs_dim):
+        raise ValueError(f'Invalid x_index/y_index for obs_dim={obs_dim}: x_index={x_index}, y_index={y_index}')
+
+    x = np.linspace(-span, span, grid_size)
+    y = np.linspace(-span, span, grid_size)
+    x_grid, y_grid = np.meshgrid(x, y)
+    flat_x = x_grid.ravel()
+    flat_y = y_grid.ravel()
+
+    batch_obs = np.repeat(np.expand_dims(obs, axis=0), flat_x.shape[0], axis=0)
+    batch_obs[:, x_index] = flat_x
+    batch_obs[:, y_index] = flat_y
+
+    safe_value = agent.safe_value.apply_fn({'params': agent.safe_value.params}, jax.device_put(batch_obs))
+    value_square = np.asarray(safe_value).reshape(x_grid.shape)
+
+    fig, ax = plt.subplots(figsize=(5.6, 4.6), constrained_layout=True)
+    norm = colors.Normalize(vmin=float(np.min(value_square)), vmax=float(np.max(value_square)))
+    ct = ax.contourf(x_grid, y_grid, value_square, norm=norm, levels=30, cmap='viridis')
+    ct_line = ax.contour(x_grid, y_grid, value_square, levels=[0], colors='#FFD166', linewidths=1.8)
+    ax.clabel(ct_line, inline=True, fontsize=11, fmt='0')
+    cb = plt.colorbar(ct, ax=ax, shrink=0.9, pad=0.02)
+    cb.ax.tick_params(labelsize=11)
+
+    ax.set_title(f'CTCE Value Slice: obs[{x_index}] vs obs[{y_index}]', fontsize=13)
+    ax.set_xlabel(f'obs[{x_index}]', fontsize=12)
+    ax.set_ylabel(f'obs[{y_index}]', fontsize=12)
+
+    out_path = os.path.join(model_location, 'imgs', 'viz_map_ctce.png')
+    plt.savefig(out_path, dpi=350)
+    plt.close(fig)
+    return out_path
+
+
 def load_diffusion_model(model_location):
 
     with open(os.path.join(model_location, 'config.json'), 'r') as file:
         cfg = to_config_dict(json.load(file))
 
-    env = eval('PointRobot')(id=0, seed=0)
+    env, is_ctce = _make_env(cfg)
 
     config_dict = dict(cfg['agent_kwargs'])
     model_cls = config_dict.pop("model_cls") 
@@ -217,19 +351,31 @@ def load_diffusion_model(model_location):
         max_path = numbers[max_number]
         return max_path
     
-    model_file = get_model_file()
+    model_file = FLAGS.model_file if FLAGS.model_file != '' else get_model_file()
     new_agent = agent.load(model_file)
 
     if not os.path.exists(f"{model_location}/imgs"):
         os.makedirs(f"{model_location}/imgs")
 
-    return env, new_agent
+    return env, new_agent, cfg, is_ctce
 
 def main(_):
-
-    env, diffusion_agent = load_diffusion_model(FLAGS.model_location)
-    
-    plot_pic(env, diffusion_agent, FLAGS.model_location)
+    env, diffusion_agent, cfg, is_ctce = load_diffusion_model(FLAGS.model_location)
+    if is_ctce or _infer_num_agents_from_env_name(cfg.get('env_name', '')) is not None:
+        out_path = plot_ctce_value_slice(
+            env,
+            diffusion_agent,
+            FLAGS.model_location,
+            int(FLAGS.x_index),
+            int(FLAGS.y_index),
+            float(FLAGS.span),
+            int(FLAGS.grid_size),
+        )
+        print(f'Saved CTCE value slice to: {out_path}')
+    else:
+        plot_pic(env, diffusion_agent, FLAGS.model_location)
+        print(f"Saved PointRobot map to: {os.path.join(FLAGS.model_location, 'imgs', 'viz_map.png')}")
+    env.close()
 
 
 if __name__ == '__main__':
