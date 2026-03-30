@@ -113,7 +113,7 @@ def get_config(config_string):
                 seed=base_real_config['seed'],
                 max_steps=1000001,
                 eval_episodes=20,
-                batch_size=256,
+                batch_size=512,
                 log_interval=1000,
                 eval_interval=50000,
                 normalize_returns=True,
