@@ -30,6 +30,8 @@ if __name__ == "__main__":
     parser.add_argument('--cbins', type=int, default=60)
     parser.add_argument('--rbins', type=int, default=50)
     parser.add_argument('--npb', type=int, default=1000)
+    parser.add_argument('--no_filter', action="store_true", help='Disable grid filtering and keep all trajectories.')
+    parser.add_argument('--preserve_cost_le', type=float, default=None, help='Always keep trajectories with episode cost <= this threshold before filtering others.')
     parser.add_argument('--save', action="store_true")
     args = parser.parse_args()
 
@@ -79,21 +81,63 @@ if __name__ == "__main__":
     plt.savefig(output_path)
     plt.clf()
 
+    original_traj_num = len(traj)
+
     # downsampling the trajectories by grid filter
-    cost_ret, rew_ret, traj = filter_trajectory(
-        cost_ret,
-        rew_ret,
-        traj,
-        cost_min=args.cmin,
-        cost_max=args.cmax,
-        rew_min=args.rmin,
-        rew_max=args.rmax,
-        cost_bins=args.cbins,
-        rew_bins=args.rbins,
-        max_num_per_bin=args.npb
-    )
+    if args.no_filter:
+        print('[INFO] --no_filter enabled: keep all trajectories without grid filtering.')
+    else:
+        if args.preserve_cost_le is not None:
+            keep_cost = float(args.preserve_cost_le)
+            keep_indices = [i for i, c in enumerate(cost_ret) if c <= keep_cost]
+            filter_indices = [i for i, c in enumerate(cost_ret) if c > keep_cost]
+
+            preserved_cost = [cost_ret[i] for i in keep_indices]
+            preserved_rew = [rew_ret[i] for i in keep_indices]
+            preserved_traj = [traj[i] for i in keep_indices]
+
+            filter_cost = [cost_ret[i] for i in filter_indices]
+            filter_rew = [rew_ret[i] for i in filter_indices]
+            filter_traj = [traj[i] for i in filter_indices]
+
+            print(
+                f"[INFO] preserve_cost_le={keep_cost}: keep {len(preserved_traj)} low-cost trajectories, "
+                f"apply grid filter on {len(filter_traj)} trajectories."
+            )
+
+            if len(filter_traj) > 0:
+                filter_cost, filter_rew, filter_traj = filter_trajectory(
+                    filter_cost,
+                    filter_rew,
+                    filter_traj,
+                    cost_min=args.cmin,
+                    cost_max=args.cmax,
+                    rew_min=args.rmin,
+                    rew_max=args.rmax,
+                    cost_bins=args.cbins,
+                    rew_bins=args.rbins,
+                    max_num_per_bin=args.npb,
+                )
+
+            cost_ret = preserved_cost + filter_cost
+            rew_ret = preserved_rew + filter_rew
+            traj = preserved_traj + filter_traj
+        else:
+            cost_ret, rew_ret, traj = filter_trajectory(
+                cost_ret,
+                rew_ret,
+                traj,
+                cost_min=args.cmin,
+                cost_max=args.cmax,
+                rew_min=args.rmin,
+                rew_max=args.rmax,
+                cost_bins=args.cbins,
+                rew_bins=args.rbins,
+                max_num_per_bin=args.npb,
+            )
 
     print(f"Num of trajectories after filtering: {len(traj)}")
+    print(f"Trajectory keep ratio: {len(traj)}/{original_traj_num} = {len(traj) / max(1, original_traj_num):.4f}")
 
     # plot the filtered dataset cost-reward figure
     plt.scatter(cost_ret, rew_ret)

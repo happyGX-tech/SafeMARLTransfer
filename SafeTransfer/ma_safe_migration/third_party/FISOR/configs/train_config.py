@@ -64,5 +64,60 @@ def get_config(config_string):
                 **base_real_config,
             )
         ),
+        # Recommended preset for CTCE multi-agent training on raw (unfiltered) HDF5.
+        # Notes:
+        # - Use train_offline.py with --dataset_path pointing to raw collected file.
+        # - Keep --ratio=1.0 to avoid additional downsampling.
+        # - For QC in CTCE (joint cost), cost_limit should be tuned by agent count and task scale.
+        "fisor_ctce_raw": ConfigDict(
+            dict(
+                agent_kwargs=dict(
+                    model_cls="FISOR",
+                    cost_limit=20,
+                    actor_lr=2e-4,
+                    critic_lr=3e-4,
+                    value_lr=3e-4,
+                    cost_temperature=2.0,
+                    reward_temperature=2.0,
+                    T=5,
+                    N=8,
+                    M=0,
+                    clip_sampler=True,
+                    actor_dropout_rate=0.05,
+                    actor_num_blocks=3,
+                    actor_weight_decay=None,
+                    decay_steps=int(3e6),
+                    actor_layer_norm=True,
+                    value_layer_norm=False,
+                    actor_tau=0.001,
+                    actor_architecture='ln_resnet',
+                    critic_objective='expectile',
+                    critic_hyperparam=0.9,
+                    cost_critic_hyperparam=0.9,
+                    critic_type="qc",  # For CTCE, QC is easier to interpret with cost_limit boundary.
+                    cost_ub=50,
+                    beta_schedule='vp',
+                    actor_objective="feasibility",
+                    sampling_method="ddpm",
+                    extract_method="minqc",
+                    decentralized_actor=False,
+                    num_agents=1,
+                ),
+                dataset_kwargs=dict(
+                    cost_scale=1,
+                    pr_data='data/point_robot-expert-random-100k.hdf5',
+                    local_hdf5_path='',
+                    num_agents=-1,
+                ),
+                project='FISOR',
+                seed=base_real_config['seed'],
+                max_steps=1000001,
+                eval_episodes=20,
+                batch_size=256,
+                log_interval=1000,
+                eval_interval=50000,
+                normalize_returns=True,
+            )
+        ),
     }
     return possible_structures[config_string]

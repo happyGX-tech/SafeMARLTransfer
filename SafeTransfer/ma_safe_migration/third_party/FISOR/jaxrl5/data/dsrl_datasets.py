@@ -13,11 +13,34 @@ class DSRLDataset(Dataset):
             with h5py.File(h5_path, 'r') as f:
                 keys = set(f.keys())
 
+                # Build deterministic random sample indices when using a partial ratio.
+                sample_indices = None
+                sample_total = None
+                sample_limit = None
+                if local_ratio is not None and 0 < float(local_ratio) < 1.0:
+                    for candidate in ('observations', 'state'):
+                        if candidate in keys and f[candidate].ndim > 0:
+                            sample_total = int(f[candidate].shape[0])
+                            break
+                    if sample_total is None:
+                        for key in keys:
+                            if f[key].ndim > 0:
+                                sample_total = int(f[key].shape[0])
+                                break
+                    if sample_total is None:
+                        raise ValueError('Cannot infer sample dimension for local HDF5 ratio loading.')
+                    sample_limit = max(1, int(sample_total * float(local_ratio)))
+                    rng = np.random.default_rng(0)
+                    sample_indices = np.sort(rng.choice(sample_total, size=sample_limit, replace=False))
+                    print(
+                        f"[DSRLDataset] local ratio={float(local_ratio):.3f}, "
+                        f"randomly sampled {sample_limit}/{sample_total} transitions (seed=0)."
+                    )
+
                 def _read_array(key):
                     arr = f[key]
-                    if local_ratio is not None and 0 < float(local_ratio) < 1.0 and arr.ndim > 0:
-                        limit = max(1, int(arr.shape[0] * float(local_ratio)))
-                        return np.array(arr[:limit])
+                    if sample_indices is not None and arr.ndim > 0 and int(arr.shape[0]) == int(sample_total):
+                        return np.array(arr[sample_indices])
                     return np.array(arr)
 
                 # PointRobot legacy format.

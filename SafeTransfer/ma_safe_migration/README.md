@@ -163,6 +163,35 @@ python third_party/DSRL/scripts/process_dataset.py \
   --cmin 0 --cmax 120 --rmin -200 --rmax 200 --save
 ```
 
+如果你担心过滤会丢掉保守低 cost 轨迹，可选以下两种方式：
+
+1) 完全不过滤（推荐先做基线对照）：
+
+```bash
+python third_party/DSRL/scripts/process_dataset.py \
+  "./third_party/FSRL/logs_local/fast-safe-rl/ctce-n3-cost-5-100/<run_tag>/offline_dataset_ctce.hdf5" \
+  --output ctce_n3_nofilter \
+  --dir ./third_party/DSRL/processed \
+  --no_filter --save
+```
+
+2) 保留低 cost 轨迹 + 对其余数据做网格过滤：
+
+```bash
+python third_party/DSRL/scripts/process_dataset.py \
+  "./third_party/FSRL/logs_local/fast-safe-rl/ctce-n3-cost-5-100/<run_tag>/offline_dataset_ctce.hdf5" \
+  --output ctce_n3_keep_low_cost \
+  --dir ./third_party/DSRL/processed \
+  --preserve_cost_le 20 \
+  --cmin 0 --cmax 120 --rmin -200 --rmax 200 \
+  --cbins 60 --rbins 50 --npb 1000 --save
+```
+
+说明：
+
+- `--no_filter` 会直接保留全部 trajectory，不做网格过滤。
+- `--preserve_cost_le` 会先保留低 cost 轨迹，再过滤其余轨迹，减少“保守样本被稀释”的风险。
+
 典型输出：
 
 - `fig/ctce_n3-120_before_filter.png`
@@ -336,6 +365,7 @@ python launcher/viz/viz_map.py --x_index 0 --y_index 1 --span 3.0 --grid_size 12
    - 检查三处是否一致：`--num_agents`、`--custom_env_name` 的 N、数据文件名 `ctce_nN`。
 2. 显存/内存压力大
    - 优先减小 `--ratio`，再降低 batch 或并发。
+  - 当前实现中，本地 HDF5 的 `--ratio < 1` 会做固定随机抽样（seed=0），避免只截取前缀数据导致分布偏差。
 3. `safety_gymnasium` 导入异常
    - 确认在目标 conda 环境中执行，且已安装 `-e ../../SRL/safety-gymnasium-main`。
 
