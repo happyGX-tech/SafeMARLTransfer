@@ -10,6 +10,8 @@ import gymnasium as gym
 from ml_collections import ConfigDict
 import matplotlib.pyplot as plt
 from matplotlib import colors
+from matplotlib import patches
+import matplotlib.tri as mtri
 import jax
 from env.point_robot import PointRobot
 from jaxrl5.agents import FISOR
@@ -25,6 +27,11 @@ flags.DEFINE_float('span', 3.0, 'Half width of visualization range [-span, span]
 flags.DEFINE_integer('grid_size', 121, 'Grid size for CTCE value slice visualization')
 flags.DEFINE_float('boundary_value', float('nan'), 'Optional manual feasible-boundary threshold. NaN means auto by critic_type')
 flags.DEFINE_string('output_image_name', '', 'Output image file name or absolute path for visualization result')
+flags.DEFINE_bool('semantic_xy', True, 'Use physical x-y semantic visualization for CTCE (recommended).')
+flags.DEFINE_integer('semantic_steps', 8000, 'Max rollout steps used to collect semantic x-y samples.')
+flags.DEFINE_integer('semantic_episodes', 10, 'Max rollout episodes used to collect semantic x-y samples.')
+flags.DEFINE_integer('semantic_agent_index', 0, 'Agent index used for x-y semantic plane in multi-agent env.')
+flags.DEFINE_bool('semantic_dual_panel', True, 'Render dual-panel semantic plot: GT panel + learned panel.')
 
 
 def to_config_dict(d):
@@ -160,6 +167,184 @@ def _resolve_output_image_path(model_location, default_name):
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
     return out_path
+
+
+def _extract_semantic_geometry(env, agent_index):
+    ma_env = getattr(env, 'ma_env', None)
+    if ma_env is None:
+        raise ValueError('semantic_xy mode requires CTCE wrapped env with ma_env.')
+
+    base_env = ma_env.unwrapped if hasattr(ma_env, 'unwrapped') else ma_env
+    task = getattr(base_env, 'task', None)
+    if task is None:
+        raise ValueError('Cannot access safety-gym task object for semantic geometry.')
+
+    # Get arena extents from task placement configuration.
+    extents = getattr(getattr(task, 'placements_conf', None), 'extents', [-3.0, -3.0, 3.0, 3.0])
+    xmin, ymin, xmax, ymax = [float(v) for v in extents]
+
+    # Hazards ground-truth circles.
+    hazards_obj = getattr(task, 'hazards', None)
+    hazard_radius = float(getattr(hazards_obj, 'size', 0.2)) if hazards_obj is not None else 0.2
+    hazard_positions = []
+    if hazards_obj is not None and hasattr(hazards_obj, 'pos'):
+        for pos in hazards_obj.pos:
+            p = np.asarray(pos, dtype=np.float32).reshape(-1)
+            if p.shape[0] >= 2:
+                hazard_positions.append(p[:2])
+
+    # Optional goals for context.
+    goal_positions = []
+    if hasattr(task, 'goal_names'):
+        for goal_name in getattr(task, 'goal_names'):
+            if hasattr(task, goal_name):
+                goal_obj = getattr(task, goal_name)
+                if hasattr(goal_obj, 'pos'):
+                    p = np.asarray(goal_obj.pos, dtype=np.float32).reshape(-1)
+                    if p.shape[0] >= 2:
+                        goal_positions.append(p[:2])
+
+    # Accessor for agent world position.
+    def get_agent_xy():
+        return np.asarray(task.agent.pos(int(agent_index))[:2], dtype=np.float32)
+
+    return {
+        'extents': (xmin, ymin, xmax, ymax),
+        'hazard_positions': hazard_positions,
+        'hazard_radius': hazard_radius,
+        'goal_positions': goal_positions,
+        'get_agent_xy': get_agent_xy,
+    }
+
+
+def plot_ctce_semantic_xy(env, agent, cfg, output_path):
+    threshold, threshold_source = _get_boundary_threshold(cfg)
+    obs, _ = env.reset(seed=int(FLAGS.seed))
+    obs = np.asarray(obs, dtype=np.float32)
+
+    geom = _extract_semantic_geometry(env, int(FLAGS.semantic_agent_index))
+    xmin, ymin, xmax, ymax = geom['extents']
+
+    xy_points = []
+    values = []
+    traj_xy = []
+    total_steps = 0
+
+    for _ in range(int(FLAGS.semantic_episodes)):
+        done = False
+        obs, _ = env.reset()
+        obs = np.asarray(obs, dtype=np.float32)
+        while not done and total_steps < int(FLAGS.semantic_steps):
+            v = agent.safe_value.apply_fn({'params': agent.safe_value.params}, jax.device_put(obs[None, ...]))
+            v_scalar = float(np.asarray(v).reshape(-1)[0])
+            xy = geom['get_agent_xy']()
+
+            xy_points.append([float(xy[0]), float(xy[1])])
+            values.append(v_scalar)
+            traj_xy.append([float(xy[0]), float(xy[1])])
+
+            action, agent = agent.eval_actions(obs)
+            obs, _, terminated, truncated, _ = env.step(action)
+            obs = np.asarray(obs, dtype=np.float32)
+            done = bool(terminated or truncated)
+            total_steps += 1
+
+        if total_steps >= int(FLAGS.semantic_steps):
+            break
+
+    if len(xy_points) < 30:
+        raise ValueError('Not enough semantic samples collected for contour plot. Increase --semantic_steps.')
+
+    xy_points = np.asarray(xy_points, dtype=np.float32)
+    values = np.asarray(values, dtype=np.float32)
+    traj_xy = np.asarray(traj_xy, dtype=np.float32)
+
+    if bool(FLAGS.semantic_dual_panel):
+        fig, (ax_gt, ax_learned) = plt.subplots(nrows=1, ncols=2, figsize=(13.6, 6.1), constrained_layout=True)
+    else:
+        fig, ax_learned = plt.subplots(figsize=(7.8, 6.2), constrained_layout=True)
+        ax_gt = None
+
+    tri = mtri.Triangulation(xy_points[:, 0], xy_points[:, 1])
+
+    # Left panel: ground-truth semantic map only.
+    if ax_gt is not None:
+        for idx, hxy in enumerate(geom['hazard_positions']):
+            hazard_fill = patches.Circle((float(hxy[0]), float(hxy[1])), geom['hazard_radius'], facecolor='#EF5350', alpha=0.2, edgecolor='none')
+            hazard_edge = patches.Circle((float(hxy[0]), float(hxy[1])), geom['hazard_radius'], facecolor='none', edgecolor='black', linewidth=2.0, linestyle='--')
+            ax_gt.add_patch(hazard_fill)
+            ax_gt.add_patch(hazard_edge)
+            if idx == 0:
+                hazard_edge.set_label('GT infeasible (hazard)')
+
+        for idx, gxy in enumerate(geom['goal_positions']):
+            ax_gt.scatter(float(gxy[0]), float(gxy[1]), s=45, c='#66BB6A', edgecolors='black', linewidths=0.4, zorder=4)
+            if idx == 0:
+                ax_gt.text(float(gxy[0]) + 0.06, float(gxy[1]) + 0.06, 'goal', fontsize=9, color='#2E7D32')
+
+        if len(traj_xy) > 2:
+            ax_gt.plot(traj_xy[:, 0], traj_xy[:, 1], color='#455A64', alpha=0.3, linewidth=1.1, label='rollout trace')
+
+        ax_gt.set_title(f'Ground-Truth Infeasible Regions\n(agent_{int(FLAGS.semantic_agent_index)})', fontsize=12)
+        ax_gt.set_xlabel('world x', fontsize=11)
+        ax_gt.set_ylabel('world y', fontsize=11)
+        ax_gt.set_xlim([xmin, xmax])
+        ax_gt.set_ylim([ymin, ymax])
+        ax_gt.set_aspect('equal', adjustable='box')
+        ax_gt.grid(alpha=0.2)
+        ax_gt.legend(loc='lower left', fontsize=9)
+
+    # Right panel: learned value + learned boundary + GT overlay.
+    contourf = ax_learned.tricontourf(tri, values, levels=30, cmap='viridis')
+
+    # Learned feasible boundary.
+    has_real_boundary = float(np.min(values - threshold)) <= 0.0 <= float(np.max(values - threshold))
+    if has_real_boundary:
+        learned_ct = ax_learned.tricontour(tri, values, levels=[threshold], colors='#26C6DA', linewidths=2.3)
+        ax_learned.clabel(learned_ct, inline=True, fontsize=10, fmt=f'learned@{threshold:.2f}')
+    else:
+        proxy_level = float(np.percentile(values, 35.0))
+        proxy_ct = ax_learned.tricontour(tri, values, levels=[proxy_level], colors='#26C6DA', linewidths=2.0, linestyles='dashed')
+        ax_learned.clabel(proxy_ct, inline=True, fontsize=10, fmt=f'proxy@{proxy_level:.2f}')
+
+    # Ground-truth infeasible regions from hazards.
+    for idx, hxy in enumerate(geom['hazard_positions']):
+        hazard_fill = patches.Circle((float(hxy[0]), float(hxy[1])), geom['hazard_radius'], facecolor='#EF5350', alpha=0.18, edgecolor='none')
+        hazard_edge = patches.Circle((float(hxy[0]), float(hxy[1])), geom['hazard_radius'], facecolor='none', edgecolor='black', linewidth=2.0, linestyle='--')
+        ax_learned.add_patch(hazard_fill)
+        ax_learned.add_patch(hazard_edge)
+        if idx == 0:
+            hazard_edge.set_label('GT infeasible (hazard)')
+
+    # Goals for context.
+    for idx, gxy in enumerate(geom['goal_positions']):
+        ax_learned.scatter(float(gxy[0]), float(gxy[1]), s=42, c='#66BB6A', edgecolors='black', linewidths=0.4, zorder=4)
+        if idx == 0:
+            ax_learned.text(float(gxy[0]) + 0.06, float(gxy[1]) + 0.06, 'goal', fontsize=9, color='#2E7D32')
+
+    # Trajectory trace.
+    if len(traj_xy) > 2:
+        ax_learned.plot(traj_xy[:, 0], traj_xy[:, 1], color='#455A64', alpha=0.22, linewidth=1.0, label='rollout trace')
+
+    cb = plt.colorbar(contourf, ax=ax_learned, shrink=0.92, pad=0.02)
+    cb.ax.tick_params(labelsize=10)
+    cb.set_label('learned safe value', fontsize=10)
+
+    title_suffix = f'boundary={threshold:.2f} ({threshold_source})'
+    if not has_real_boundary:
+        title_suffix += ', no real crossing in sampled region'
+    ax_learned.set_title(f'Learned Feasible Boundary + GT Overlay\n(agent_{int(FLAGS.semantic_agent_index)}), {title_suffix}', fontsize=12)
+    ax_learned.set_xlabel('world x', fontsize=11)
+    ax_learned.set_ylabel('world y', fontsize=11)
+    ax_learned.set_xlim([xmin, xmax])
+    ax_learned.set_ylim([ymin, ymax])
+    ax_learned.set_aspect('equal', adjustable='box')
+    ax_learned.grid(alpha=0.2)
+    ax_learned.legend(loc='lower left', fontsize=9)
+
+    plt.savefig(output_path, dpi=350)
+    plt.close(fig)
+    return output_path
 
 hazard_position_list = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
 
@@ -463,17 +648,21 @@ def main(_):
     model_location = _resolve_model_location(FLAGS.model_location)
     env, diffusion_agent, cfg, is_ctce = load_diffusion_model(model_location)
     if is_ctce or _infer_num_agents_from_env_name(cfg.get('env_name', '')) is not None:
-        output_path = _resolve_output_image_path(model_location, 'viz_map_ctce.png')
-        out_path = plot_ctce_value_slice(
-            env,
-            diffusion_agent,
-            cfg,
-            output_path,
-            int(FLAGS.x_index),
-            int(FLAGS.y_index),
-            float(FLAGS.span),
-            int(FLAGS.grid_size),
-        )
+        if bool(FLAGS.semantic_xy):
+            output_path = _resolve_output_image_path(model_location, 'viz_map_ctce_semantic_xy_dual.png')
+            out_path = plot_ctce_semantic_xy(env, diffusion_agent, cfg, output_path)
+        else:
+            output_path = _resolve_output_image_path(model_location, 'viz_map_ctce.png')
+            out_path = plot_ctce_value_slice(
+                env,
+                diffusion_agent,
+                cfg,
+                output_path,
+                int(FLAGS.x_index),
+                int(FLAGS.y_index),
+                float(FLAGS.span),
+                int(FLAGS.grid_size),
+            )
         print(f'Saved CTCE value slice to: {out_path}')
     else:
         output_path = _resolve_output_image_path(model_location, 'viz_map.png')

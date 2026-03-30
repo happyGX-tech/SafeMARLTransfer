@@ -251,14 +251,7 @@ python launcher/examples/train_offline.py \
 1) 批量评估同一实验目录下全部 `model*.pickle`：
 
 ```bash
-cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
-python launcher/examples/eval_offline.py \
-  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
-  --evaluate_all=True \
-  --eval_episodes=20 \
-  --wandb_project FISOR \
-  --wandb_mode online \
-  --summary_filename eval_summary_n4.json
+python launcher/examples/eval_offline.py --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s913_750 --evaluate_all=True --eval_episodes=20 --wandb_project FISOR --wandb_mode online --summary_filename eval_summary_n4.json
 ```
 
 可选参数：
@@ -271,37 +264,32 @@ python launcher/examples/eval_offline.py \
 - 每个 checkpoint 的指标汇总写入 `eval_summary.json`。
 - 终端会逐个打印 `return / cost / episode_len`。
 
-2) 生成 CTCE 可视化图（Value Slice）：
+2) 生成 CTCE 可视化图（推荐：语义双图，左 GT / 右 Learned+GT）：
+
+Linux 一行命令：
 
 ```bash
-cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
-python launcher/viz/viz_map.py \
-  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
-  --x_index 0 \
-  --y_index 1 \
-  --span 3.0 \
-  --grid_size 121 \
-  --output_image_name viz_map_ctce_model3.png
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && python launcher/viz/viz_map.py --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750 --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750/model3.pickle --semantic_xy=True --semantic_dual_panel=True --semantic_agent_index=0 --semantic_steps=8000 --semantic_episodes=10 --output_image_name viz_map_ctce_semantic_xy_dual_model3.png
 ```
 
-推荐：直接画“最安全模型”与“最高收益模型”的可行域边界（更容易比较）
+PowerShell（Windows）可执行命令：
+
+```powershell
+conda activate FISOR
+cd "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR"
+python launcher/viz/viz_map.py --model_location "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR\results\sg_ant_goal_n4\ctce_n4_fisor_2026-03-30_s135_750" --model_file "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR\results\sg_ant_goal_n4\ctce_n4_fisor_2026-03-30_s135_750\model3.pickle" --semantic_xy=True --semantic_dual_panel=True --semantic_agent_index=0 --semantic_steps=8000 --semantic_episodes=10 --output_image_name "viz_map_ctce_semantic_xy_dual_model3.png"
+```
+
+如果需要回退到旧版 Value Slice：
 
 ```bash
-cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
-python launcher/viz/viz_map.py \
-  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
-  --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915/model3.pickle \
-  --x_index 0 --y_index 1 --span 3.0 --grid_size 161
-
-cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
-python launcher/viz/viz_map.py \
-  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
-  --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915/model4.pickle \
-  --x_index 0 --y_index 1 --span 3.0 --grid_size 161
+python launcher/viz/viz_map.py --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750 --x_index 0 --y_index 1 --span 3.0 --grid_size 121 --output_image_name viz_map_ctce_value_slice_model3.png
 ```
 
 说明：
 
+- `semantic_xy=True`：在真实环境 rollout 中采样 agent 世界坐标 x-y。
+- `semantic_dual_panel=True`：输出双图（左图 GT 不可行域，右图 Learned 边界叠加 GT）。
 - `viz_map.py` 会按 critic 类型自动选择边界阈值：`qc` 用 `cost_limit`，`hj` 用 0。
 - 如需手动指定边界阈值（例如固定按 10），可加 `--boundary_value 10`。
 - `eval_offline.py` 可用 `--summary_filename` 自定义结果 JSON 文件名（支持绝对路径）。
@@ -309,7 +297,7 @@ python launcher/viz/viz_map.py \
 
 可视化输出：
 
-- 图片保存为 `imgs/viz_map_ctce.png`。
+- 默认保存在实验目录下 `imgs/`；若使用 `--output_image_name`，按该参数保存。
 
 3) 一次性指定目录（可不传 `--model_location`）：
 
@@ -365,7 +353,9 @@ python launcher/viz/viz_map.py --x_index 0 --y_index 1 --span 3.0 --grid_size 12
    - 检查三处是否一致：`--num_agents`、`--custom_env_name` 的 N、数据文件名 `ctce_nN`。
 2. 显存/内存压力大
    - 优先减小 `--ratio`，再降低 batch 或并发。
-  - 当前实现中，本地 HDF5 的 `--ratio < 1` 会做固定随机抽样（seed=0），避免只截取前缀数据导致分布偏差。
+
+- 当前实现中，本地 HDF5 的 `--ratio < 1` 会做固定随机抽样（seed=0），避免只截取前缀数据导致分布偏差。
+
 3. `safety_gymnasium` 导入异常
    - 确认在目标 conda 环境中执行，且已安装 `-e ../../SRL/safety-gymnasium-main`。
 
