@@ -23,6 +23,7 @@ flags.DEFINE_integer('x_index', 0, 'Observation index used as x-axis in CTCE val
 flags.DEFINE_integer('y_index', 1, 'Observation index used as y-axis in CTCE value slice')
 flags.DEFINE_float('span', 3.0, 'Half width of visualization range [-span, span] for CTCE value slice')
 flags.DEFINE_integer('grid_size', 121, 'Grid size for CTCE value slice visualization')
+flags.DEFINE_float('boundary_value', float('nan'), 'Optional manual feasible-boundary threshold. NaN means auto by critic_type')
 
 
 def to_config_dict(d):
@@ -128,6 +129,20 @@ def _resolve_model_location(flag_value):
     if os.path.exists(os.path.join(cwd, 'config.json')):
         return os.path.abspath(cwd)
     return ''
+
+
+def _get_boundary_threshold(cfg):
+    if not np.isnan(float(FLAGS.boundary_value)):
+        return float(FLAGS.boundary_value), 'manual'
+
+    agent_kwargs = cfg.get('agent_kwargs', {})
+    critic_type = str(agent_kwargs.get('critic_type', 'qc')).lower()
+    if critic_type == 'hj':
+        return 0.0, 'hj_zero_level'
+
+    # qc: feasible typically means expected cumulative cost <= cost_limit.
+    cost_limit = float(agent_kwargs.get('cost_limit', 10.0))
+    return cost_limit, 'qc_cost_limit'
 
 hazard_position_list = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
 
@@ -294,7 +309,7 @@ def plot_pic(env, agent, model_location):
     plt.savefig(f"{model_location}/imgs/viz_map.png", dpi=600)
 
 
-def plot_ctce_value_slice(env, agent, model_location, x_index, y_index, span, grid_size):
+def plot_ctce_value_slice(env, agent, cfg, model_location, x_index, y_index, span, grid_size):
     obs, _ = env.reset(seed=int(FLAGS.seed))
     obs = np.asarray(obs, dtype=np.float32).reshape(-1)
     obs_dim = obs.shape[0]
@@ -315,15 +330,61 @@ def plot_ctce_value_slice(env, agent, model_location, x_index, y_index, span, gr
     safe_value = agent.safe_value.apply_fn({'params': agent.safe_value.params}, jax.device_put(batch_obs))
     value_square = np.asarray(safe_value).reshape(x_grid.shape)
 
+    threshold, threshold_source = _get_boundary_threshold(cfg)
+    sign_field = value_square - threshold
+    has_real_boundary = float(np.min(sign_field)) <= 0.0 <= float(np.max(sign_field))
+
     fig, ax = plt.subplots(figsize=(5.6, 4.6), constrained_layout=True)
     norm = colors.Normalize(vmin=float(np.min(value_square)), vmax=float(np.max(value_square)))
     ct = ax.contourf(x_grid, y_grid, value_square, norm=norm, levels=30, cmap='viridis')
-    ct_line = ax.contour(x_grid, y_grid, value_square, levels=[0], colors='#FFD166', linewidths=1.8)
-    ax.clabel(ct_line, inline=True, fontsize=11, fmt='0')
+
+    if has_real_boundary:
+        ct_line = ax.contour(
+            x_grid,
+            y_grid,
+            value_square,
+            levels=[threshold],
+            colors='#2EC4B6',
+            linewidths=2.2,
+            linestyles='solid',
+        )
+        ax.clabel(ct_line, inline=True, fontsize=10, fmt=f'feasible@{threshold:.2f}')
+    else:
+        # If the chosen threshold is outside current value range, draw a proxy contour for readability.
+        proxy_level = float(np.percentile(value_square, 35.0))
+        proxy_line = ax.contour(
+            x_grid,
+            y_grid,
+            value_square,
+            levels=[proxy_level],
+            colors='#2EC4B6',
+            linewidths=2.2,
+            linestyles='dashed',
+        )
+        ax.clabel(proxy_line, inline=True, fontsize=10, fmt=f'proxy@{proxy_level:.2f}')
+
+    # Shade feasible side for quicker visual parsing.
+    critic_type = str(cfg.get('agent_kwargs', {}).get('critic_type', 'qc')).lower()
+    if critic_type == 'hj':
+        feasible_mask = (value_square >= threshold).astype(np.int32)
+    else:
+        feasible_mask = (value_square <= threshold).astype(np.int32)
+    ax.contourf(
+        x_grid,
+        y_grid,
+        feasible_mask,
+        levels=[0.5, 1.5],
+        colors=['#2EC4B6'],
+        alpha=0.15,
+    )
+
     cb = plt.colorbar(ct, ax=ax, shrink=0.9, pad=0.02)
     cb.ax.tick_params(labelsize=11)
 
-    ax.set_title(f'CTCE Value Slice: obs[{x_index}] vs obs[{y_index}]', fontsize=13)
+    boundary_note = f'boundary={threshold:.2f} ({threshold_source})'
+    if not has_real_boundary:
+        boundary_note += ', no real crossing in this slice'
+    ax.set_title(f'CTCE Value Slice: obs[{x_index}] vs obs[{y_index}]\n{boundary_note}', fontsize=12)
     ax.set_xlabel(f'obs[{x_index}]', fontsize=12)
     ax.set_ylabel(f'obs[{y_index}]', fontsize=12)
 
@@ -388,6 +449,7 @@ def main(_):
         out_path = plot_ctce_value_slice(
             env,
             diffusion_agent,
+            cfg,
             model_location,
             int(FLAGS.x_index),
             int(FLAGS.y_index),

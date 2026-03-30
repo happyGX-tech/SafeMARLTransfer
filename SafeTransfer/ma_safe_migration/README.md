@@ -92,7 +92,7 @@ export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 ```
 
-## 4. 全链路最小工作流（推荐执行顺序）
+## 4. 训练步骤
 
 ### Step 0) 环境可用性验证
 
@@ -188,6 +188,57 @@ python launcher/examples/train_offline.py `
   --experiment_name "ctce_n4_fisor"
 ```
 
+### Step 6) FISOR 离线评估与可视化（CTCE）
+
+在 `third_party/FISOR` 目录执行。建议优先使用一行命令，避免 shell 换行导致参数失效。
+
+1) 批量评估同一实验目录下全部 `model*.pickle`：
+
+```bash
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
+python launcher/examples/eval_offline.py \
+  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
+  --evaluate_all=True \
+  --eval_episodes=20 \
+  --wandb_project FISOR \
+  --wandb_mode online
+```
+
+可选参数：
+
+- `--wandb_entity <your_entity>`：仅在该 entity 确实存在时再传。
+- `--wandb_mode offline`：网络或权限不稳定时建议离线。
+
+评估输出：
+
+- 每个 checkpoint 的指标汇总写入 `eval_summary.json`。
+- 终端会逐个打印 `return / cost / episode_len`。
+
+2) 生成 CTCE 可视化图（Value Slice）：
+
+```bash
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
+python launcher/viz/viz_map.py \
+  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
+  --x_index 0 \
+  --y_index 1 \
+  --span 3.0 \
+  --grid_size 121
+```
+
+可视化输出：
+
+- 图片保存为 `imgs/viz_map_ctce.png`。
+
+3) 一次性指定目录（可不传 `--model_location`）：
+
+```bash
+export MODEL_LOCATION=/home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR
+python launcher/examples/eval_offline.py --evaluate_all=True --eval_episodes=20 --wandb_project FISOR --wandb_mode online
+python launcher/viz/viz_map.py --x_index 0 --y_index 1 --span 3.0 --grid_size 121
+```
+
 ## 5. FISOR 训练链路说明（当前实现）
 
 本项目已在 CTCE 场景启用“中心化 Critic + 分布式 Actor”：
@@ -195,6 +246,32 @@ python launcher/examples/train_offline.py `
 1. Critic 保持中心化：使用全局拼接观测和联合动作。
 2. Actor 改为分布式：共享参数，按 agent 局部切片训练。
 3. 执行阶段：先生成各 agent 局部动作，再拼接并由中心化 Critic 打分筛选。
+
+### 图像可视化含义说明（`viz_map_ctce.png`）
+
+该图是 CTCE 下的“状态切片价值图”（Value Slice）：
+
+1. 横轴与纵轴：
+
+- 分别对应 `obs[x_index]` 和 `obs[y_index]`（例如图中是 `obs[0]` 与 `obs[1]`）。
+- 其余观测维度固定为一次 `env.reset()` 得到的基准状态。
+
+2. 颜色：
+
+- 颜色值来自 `safe_value` 网络在该网格点的输出。
+- 这是局部切片下的安全价值分布，用于看模型在该二维子空间的风险/安全趋势。
+
+3. 如何读图：
+
+- 颜色变化平滑，说明该切片上价值函数连续性较好。
+- 同色带越密，表示该区域价值变化更快（对状态扰动更敏感）。
+- 若 `critic_type=qc`，通常可理解为“预测累计 cost”相关量，值越小一般越安全。
+- 若 `critic_type=hj`，常以 0 等值线作为可行域边界（正负号可区分安全/不安全侧）。
+
+4. 重要注意：
+
+- 这是“二维切片”，不是全状态空间全貌。
+- 不同 `x_index/y_index` 会展示不同局部结构，建议至少比较 3 组索引后再下结论。
 
 入口行为：
 
