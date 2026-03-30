@@ -615,6 +615,17 @@ def load_diffusion_model(model_location):
 
     config_dict = dict(cfg['agent_kwargs'])
     model_cls = config_dict.pop("model_cls") 
+    # Keep CTCE actor construction consistent with training/eval entrypoints.
+    # Some historical config.json files may persist default values
+    # (decentralized_actor=False, num_agents=1) even when checkpoints were
+    # trained with decentralized actor on multi-agent CTCE tasks.
+    if is_ctce or _infer_num_agents_from_env_name(cfg.get('env_name', '')) is not None:
+        num_agents = _resolve_ctce_num_agents(cfg)
+        if num_agents is None:
+            raise ValueError('Cannot resolve num_agents for CTCE model creation in viz_map.')
+        config_dict['decentralized_actor'] = True
+        config_dict['num_agents'] = int(num_agents)
+
     agent = globals()[model_cls].create(
         cfg['seed'], env.observation_space, env.action_space, **config_dict
     )
