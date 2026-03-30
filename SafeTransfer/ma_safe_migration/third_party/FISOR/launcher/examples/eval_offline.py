@@ -27,6 +27,7 @@ flags.DEFINE_bool('render', False, 'Render during evaluation')
 flags.DEFINE_string('wandb_project', '', 'Override wandb project')
 flags.DEFINE_string('wandb_entity', '', 'Optional wandb entity/team')
 flags.DEFINE_string('wandb_mode', 'online', 'wandb mode: online/offline/disabled')
+flags.DEFINE_string('summary_filename', 'eval_summary.json', 'Summary output file name (or absolute path)')
 
 
 def to_config_dict(d):
@@ -206,7 +207,27 @@ def _resolve_model_location(flag_value):
     return ''
 
 
+def _resolve_summary_path(model_location, summary_filename):
+    name = (summary_filename or '').strip()
+    if name == '':
+        name = 'eval_summary.json'
+    if not name.lower().endswith('.json'):
+        name = f'{name}.json'
+
+    if os.path.isabs(name):
+        out_path = name
+    else:
+        out_path = os.path.join(model_location, name)
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    return out_path
+
+
 def main(_):
+    print('[INFO] eval_offline.py only evaluates existing checkpoints and does NOT train model parameters.')
+
     model_location = _resolve_model_location(FLAGS.model_location)
     if model_location == '':
         raise ValueError(
@@ -235,6 +256,7 @@ def main(_):
             'eval_episodes': int(FLAGS.eval_episodes),
             'evaluate_all': bool(FLAGS.evaluate_all),
             'env_name': cfg.get('env_name', ''),
+            'summary_filename': FLAGS.summary_filename,
         },
         'mode': FLAGS.wandb_mode,
         'dir': model_location,
@@ -277,7 +299,7 @@ def main(_):
         'num_models': len(results),
     }
 
-    summary_path = os.path.join(model_location, 'eval_summary.json')
+    summary_path = _resolve_summary_path(model_location, FLAGS.summary_filename)
     with open(summary_path, 'w', encoding='utf-8') as file:
         json.dump({'results': results, 'summary': summary}, file, indent=2, ensure_ascii=False)
 

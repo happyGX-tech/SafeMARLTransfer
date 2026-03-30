@@ -24,6 +24,7 @@ flags.DEFINE_integer('y_index', 1, 'Observation index used as y-axis in CTCE val
 flags.DEFINE_float('span', 3.0, 'Half width of visualization range [-span, span] for CTCE value slice')
 flags.DEFINE_integer('grid_size', 121, 'Grid size for CTCE value slice visualization')
 flags.DEFINE_float('boundary_value', float('nan'), 'Optional manual feasible-boundary threshold. NaN means auto by critic_type')
+flags.DEFINE_string('output_image_name', '', 'Output image file name or absolute path for visualization result')
 
 
 def to_config_dict(d):
@@ -144,6 +145,22 @@ def _get_boundary_threshold(cfg):
     cost_limit = float(agent_kwargs.get('cost_limit', 10.0))
     return cost_limit, 'qc_cost_limit'
 
+
+def _resolve_output_image_path(model_location, default_name):
+    name = (FLAGS.output_image_name or '').strip()
+    if name == '':
+        name = default_name
+
+    if os.path.isabs(name):
+        out_path = name
+    else:
+        out_path = os.path.join(model_location, 'imgs', name)
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    return out_path
+
 hazard_position_list = [np.array([0.4, -1.2]), np.array([-0.4, 1.2])]
 
 label_size = 18
@@ -243,7 +260,7 @@ def plot_pr_pic(ax, agent, v, theta, cb=False):
     return ax
 
 
-def plot_pic(env, agent, model_location):
+def plot_pic(env, agent, output_path):
 
     fig, ([ax1,ax2,ax3,ax4]) = plt.subplots(
         nrows=1, ncols=4,
@@ -306,10 +323,11 @@ def plot_pic(env, agent, model_location):
         ax.spines['left'].set_color('white') 
         ax.spines['right'].set_color('white')
     
-    plt.savefig(f"{model_location}/imgs/viz_map.png", dpi=600)
+    plt.savefig(output_path, dpi=600)
+    plt.close(fig)
 
 
-def plot_ctce_value_slice(env, agent, cfg, model_location, x_index, y_index, span, grid_size):
+def plot_ctce_value_slice(env, agent, cfg, output_path, x_index, y_index, span, grid_size):
     obs, _ = env.reset(seed=int(FLAGS.seed))
     obs = np.asarray(obs, dtype=np.float32).reshape(-1)
     obs_dim = obs.shape[0]
@@ -388,10 +406,9 @@ def plot_ctce_value_slice(env, agent, cfg, model_location, x_index, y_index, spa
     ax.set_xlabel(f'obs[{x_index}]', fontsize=12)
     ax.set_ylabel(f'obs[{y_index}]', fontsize=12)
 
-    out_path = os.path.join(model_location, 'imgs', 'viz_map_ctce.png')
-    plt.savefig(out_path, dpi=350)
+    plt.savefig(output_path, dpi=350)
     plt.close(fig)
-    return out_path
+    return output_path
 
 
 def load_diffusion_model(model_location):
@@ -446,11 +463,12 @@ def main(_):
     model_location = _resolve_model_location(FLAGS.model_location)
     env, diffusion_agent, cfg, is_ctce = load_diffusion_model(model_location)
     if is_ctce or _infer_num_agents_from_env_name(cfg.get('env_name', '')) is not None:
+        output_path = _resolve_output_image_path(model_location, 'viz_map_ctce.png')
         out_path = plot_ctce_value_slice(
             env,
             diffusion_agent,
             cfg,
-            model_location,
+            output_path,
             int(FLAGS.x_index),
             int(FLAGS.y_index),
             float(FLAGS.span),
@@ -458,8 +476,9 @@ def main(_):
         )
         print(f'Saved CTCE value slice to: {out_path}')
     else:
-        plot_pic(env, diffusion_agent, model_location)
-        print(f"Saved PointRobot map to: {os.path.join(model_location, 'imgs', 'viz_map.png')}")
+        output_path = _resolve_output_image_path(model_location, 'viz_map.png')
+        plot_pic(env, diffusion_agent, output_path)
+        print(f'Saved PointRobot map to: {output_path}')
     env.close()
 
 

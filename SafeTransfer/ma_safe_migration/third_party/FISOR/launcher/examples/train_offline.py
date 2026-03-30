@@ -43,6 +43,7 @@ flags.DEFINE_string('dataset_path', '', 'Optional local HDF5 dataset path to byp
 flags.DEFINE_string('custom_env_name', '', 'Optional env name override, e.g. sg_ant_goal_n4 or SafetyAntMultiGoalN4-v0')
 flags.DEFINE_integer('num_agents', -1, 'Optional explicit num_agents for variable-agent CTCE datasets')
 flags.DEFINE_integer('save_interval', 0, 'Optional checkpoint save interval in steps. If <=0, fallback to eval_interval.')
+flags.DEFINE_bool('ctce_eval', True, 'Whether to run periodic evaluation for CTCE training runs')
 config_flags.DEFINE_config_file(
     "config",
     None,
@@ -281,12 +282,13 @@ def call_main(details):
                 )
                 save_time += 1
 
-            if (not is_ctce_env) and i % details['eval_interval'] == 0:
+            should_eval = (i % details['eval_interval'] == 0) and ((not is_ctce_env) or bool(details.get('ctce_eval', True)))
+            if should_eval:
                 if details['env_name'] == 'PointRobot':
                     eval_info = evaluate_pr(agent, env, details['eval_episodes'])
                 else:
                     eval_info = evaluate(agent, env, details['eval_episodes'])
-                if details['env_name'] != 'PointRobot' and hasattr(env, 'get_normalized_score'):
+                if (not is_ctce_env) and details['env_name'] != 'PointRobot' and hasattr(env, 'get_normalized_score'):
                     eval_info["normalized_return"], eval_info["normalized_cost"] = env.get_normalized_score(eval_info["return"], eval_info["cost"])
                 wandb.log(_to_wandb_log('eval', eval_info, i), step=i)
     except KeyboardInterrupt:
@@ -315,6 +317,7 @@ def main(_):
     parameters['wandb_mode'] = FLAGS.wandb_mode
     parameters['env_name'] = FLAGS.custom_env_name if FLAGS.custom_env_name != '' else env_list[FLAGS.env_id]
     parameters['ratio'] = FLAGS.ratio
+    parameters['ctce_eval'] = bool(FLAGS.ctce_eval)
     if FLAGS.save_interval > 0:
         parameters['save_interval'] = FLAGS.save_interval
     if FLAGS.num_agents > 0:

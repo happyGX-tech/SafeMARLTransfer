@@ -173,6 +173,11 @@ python third_party/DSRL/scripts/process_dataset.py \
 
 在 `third_party/FISOR` 目录执行：
 
+重要说明：
+
+- 训练命令是 `launcher/examples/train_offline.py`。
+- `launcher/examples/eval_offline.py` 只做评估，不会更新模型参数。
+
 ```powershell
 conda activate FISOR
 cd "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR"
@@ -183,14 +188,36 @@ python launcher/examples/train_offline.py `
   --custom_env_name sg_ant_goal_n4 `
   --num_agents 4 `
   --dataset_path "D:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\DSRL\processed\ctce_n4-120-951.hdf5" `
-  --ratio 0.3 `
+  --ratio 1.0 `
   --project "ctce_debug" `
-  --experiment_name "ctce_n4_fisor"
+  --experiment_name "ctce_n4_fisor" `
+  --save_interval 50000 `
+  --ctce_eval True `
+  --wandb_mode online
+```
+
+Linux 服务器等价命令（推荐）：
+
+```bash
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
+python launcher/examples/train_offline.py \
+  --config configs/train_config.py:fisor \
+  --custom_env_name sg_ant_goal_n4 \
+  --num_agents 4 \
+  --dataset_path /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/DSRL/processed/ctce_n4-120-951.hdf5 \
+  --ratio 1.0 \
+  --project FISOR \
+  --experiment_name ctce_n4_fisor \
+  --save_interval 50000 \
+  --ctce_eval=True \
+  --wandb_mode online
 ```
 
 ### Step 6) FISOR 离线评估与可视化（CTCE）
 
 在 `third_party/FISOR` 目录执行。建议优先使用一行命令，避免 shell 换行导致参数失效。
+
+注意：下面命令是评估与可视化，不是训练。
 
 1) 批量评估同一实验目录下全部 `model*.pickle`：
 
@@ -201,7 +228,8 @@ python launcher/examples/eval_offline.py \
   --evaluate_all=True \
   --eval_episodes=20 \
   --wandb_project FISOR \
-  --wandb_mode online
+  --wandb_mode online \
+  --summary_filename eval_summary_n4.json
 ```
 
 可选参数：
@@ -223,8 +251,32 @@ python launcher/viz/viz_map.py \
   --x_index 0 \
   --y_index 1 \
   --span 3.0 \
-  --grid_size 121
+  --grid_size 121 \
+  --output_image_name viz_map_ctce_model3.png
 ```
+
+推荐：直接画“最安全模型”与“最高收益模型”的可行域边界（更容易比较）
+
+```bash
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
+python launcher/viz/viz_map.py \
+  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
+  --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915/model3.pickle \
+  --x_index 0 --y_index 1 --span 3.0 --grid_size 161
+
+cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
+python launcher/viz/viz_map.py \
+  --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915 \
+  --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-28_s135_915/model4.pickle \
+  --x_index 0 --y_index 1 --span 3.0 --grid_size 161
+```
+
+说明：
+
+- `viz_map.py` 会按 critic 类型自动选择边界阈值：`qc` 用 `cost_limit`，`hj` 用 0。
+- 如需手动指定边界阈值（例如固定按 10），可加 `--boundary_value 10`。
+- `eval_offline.py` 可用 `--summary_filename` 自定义结果 JSON 文件名（支持绝对路径）。
+- `viz_map.py` 可用 `--output_image_name` 自定义输出图片名（支持绝对路径）。
 
 可视化输出：
 
