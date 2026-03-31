@@ -2,15 +2,15 @@
 
 基于 Safety-Gymnasium（可变多 Agent）的多智能体安全迁移实验工程（SafeTransfer）。
 
-## 1. 项目搭建与链路总览
+## 1. 概况
 
-本项目建议按“双环境 + 一条主链路”理解：
+**主要组成：**
 
-1. `SafeMARL` 环境：环境验证、FSRL 训练采样、OSRL 导出、DSRL 处理。
+1. `SafeMARL` 环境：环境验证、FSRL 训练采样（TRPO）、OSRL 导出、DSRL 处理（可视化）。
 2. `FISOR` 环境：离线训练（中心化 Critic + 分布式 Actor）。
 3. 主链路：环境验证 -> FSRL 训练 -> 采集 HDF5 -> OSRL/DSRL 处理 -> FISOR 离线训练。
 
-适用目录（建议保持相对路径不变）：
+目录（需要保持相对目录不变）：
 
 ```text
 SafeMARL/
@@ -18,12 +18,13 @@ SafeMARL/
   SRL/safety-gymnasium-main
 ```
 
-## 2. 环境命名规则
+## 2. 多智能体环境命名规则
 
-- 训练别名：`sg_ant_goal_n{N}`（例如 `sg_ant_goal_n6`）。
+- 训练名称：`sg_ant_goal_n{N}`（例如 `sg_ant_goal_n6`）。
 - 注册环境：`SafetyAntMultiGoalN{N}-v0`。
+- 还可以通过制定多智能体数量创建环境
 
-## 3. 环境创建说明（清晰版）
+## 3. 环境创建说明
 
 以下命令默认在 `SafeTransfer/ma_safe_migration` 目录执行。
 
@@ -41,7 +42,7 @@ sudo apt-get install -y \
 
 ```bash
 conda create -n SafeMARL python=3.8 -y
-conda create -n FISOR python=3.8 -y
+#conda create -n FISOR python=3.9 -y FISOR的安装移步FISOR目录
 conda env list
 ```
 
@@ -66,22 +67,6 @@ pip install mujoco glfw xmltodict gymnasium-robotics
 
 ### 3.4 安装 `FISOR` 依赖（离线训练）具体请参考FISOR安装目录
 
-```bash
-conda activate FISOR
-python -m pip install --upgrade pip setuptools wheel
-
-# 二选一：CPU / CUDA
-# CPU:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-# CUDA(示例 cu121):
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-pip install -r requirements.txt
-pip install -e ../../SRL/safety-gymnasium-main
-#这里的环境配置有问题，需要修改
-pip install mujoco glfw xmltodict gymnasium-robotics
-```
-
 ### 3.5 GPU 与渲染自检
 
 ```bash
@@ -101,7 +86,7 @@ conda activate SafeMARL
 python verify_safety_gym_backend.py --num-agents 6 --steps 20 --render-mode rgb_array --randomize-layout
 ```
 
-通过标准：无 ImportError，能正常 step 并输出 rewards/costs。
+通过标准：无 ImportError，能正常 step 并输出 rewards/costs，说明环境创建成功
 
 ### Step 1) FSRL 训练 CTCE 策略
 
@@ -212,23 +197,6 @@ conda activate FISOR
 cd "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR"
 $env:XLA_PYTHON_CLIENT_PREALLOCATE="false"
 
-python launcher/examples/train_offline.py `
-  --config configs/train_config.py:fisor `
-  --custom_env_name sg_ant_goal_n4 `
-  --num_agents 4 `
-  --dataset_path "D:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\DSRL\processed\ctce_n4-120-951.hdf5" `
-  --ratio 1.0 `
-  --project "ctce_debug" `
-  --experiment_name "ctce_n4_fisor" `
-  --save_interval 50000 `
-  --ctce_eval True `
-  --wandb_mode online
-```
-
-Linux 服务器等价命令（推荐）：
-
-```bash
-cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && \
 python launcher/examples/train_offline.py \
   --config configs/train_config.py:fisor \
   --custom_env_name sg_ant_goal_n4 \
@@ -266,24 +234,8 @@ python launcher/examples/eval_offline.py --model_location /home/work3/SafeMARL/S
 
 2) 生成 CTCE 可视化图（推荐：语义双图，左 GT / 右 Learned+GT）：
 
-Linux 一行命令：
-
 ```bash
 cd /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR && python launcher/viz/viz_map.py --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750 --model_file /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750/model3.pickle --semantic_xy=True --semantic_dual_panel=True --semantic_agent_index=0 --semantic_steps=8000 --semantic_episodes=10 --output_image_name viz_map_ctce_semantic_xy_dual_model3.png
-```
-
-PowerShell（Windows）可执行命令：
-
-```powershell
-conda activate FISOR
-cd "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR"
-python launcher/viz/viz_map.py --model_location "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR\results\sg_ant_goal_n4\ctce_n4_fisor_2026-03-30_s135_750" --model_file "d:\RL-lab\safe RL\SafeMARL\SafeTransfer\ma_safe_migration\third_party\FISOR\results\sg_ant_goal_n4\ctce_n4_fisor_2026-03-30_s135_750\model3.pickle" --semantic_xy=True --semantic_dual_panel=True --semantic_agent_index=0 --semantic_steps=8000 --semantic_episodes=10 --output_image_name "viz_map_ctce_semantic_xy_dual_model3.png"
-```
-
-如果需要回退到旧版 Value Slice：
-
-```bash
-python launcher/viz/viz_map.py --model_location /home/work3/SafeMARL/SafeMARLTransfer/SafeTransfer/ma_safe_migration/third_party/FISOR/results/sg_ant_goal_n4/ctce_n4_fisor_2026-03-30_s135_750 --x_index 0 --y_index 1 --span 3.0 --grid_size 121 --output_image_name viz_map_ctce_value_slice_model3.png
 ```
 
 说明：
@@ -308,44 +260,13 @@ python launcher/examples/eval_offline.py --evaluate_all=True --eval_episodes=20 
 python launcher/viz/viz_map.py --x_index 0 --y_index 1 --span 3.0 --grid_size 121
 ```
 
-## 5. FISOR 训练链路说明（当前实现）
+## 5. FISOR 训练说明
 
 本项目已在 CTCE 场景启用“中心化 Critic + 分布式 Actor”：
 
 1. Critic 保持中心化：使用全局拼接观测和联合动作。
 2. Actor 改为分布式：共享参数，按 agent 局部切片训练。
 3. 执行阶段：先生成各 agent 局部动作，再拼接并由中心化 Critic 打分筛选。
-
-### 图像可视化含义说明（`viz_map_ctce.png`）
-
-该图是 CTCE 下的“状态切片价值图”（Value Slice）：
-
-1. 横轴与纵轴：
-
-- 分别对应 `obs[x_index]` 和 `obs[y_index]`（例如图中是 `obs[0]` 与 `obs[1]`）。
-- 其余观测维度固定为一次 `env.reset()` 得到的基准状态。
-
-2. 颜色：
-
-- 颜色值来自 `safe_value` 网络在该网格点的输出。
-- 这是局部切片下的安全价值分布，用于看模型在该二维子空间的风险/安全趋势。
-
-3. 如何读图：
-
-- 颜色变化平滑，说明该切片上价值函数连续性较好。
-- 同色带越密，表示该区域价值变化更快（对状态扰动更敏感）。
-- 若 `critic_type=qc`，通常可理解为“预测累计 cost”相关量，值越小一般越安全。
-- 若 `critic_type=hj`，常以 0 等值线作为可行域边界（正负号可区分安全/不安全侧）。
-
-4. 重要注意：
-
-- 这是“二维切片”，不是全状态空间全貌。
-- 不同 `x_index/y_index` 会展示不同局部结构，建议至少比较 3 组索引后再下结论。
-
-入口行为：
-
-- `third_party/FISOR/launcher/examples/train_offline.py` 在 CTCE 下自动注入 `decentralized_actor=True` 与 `num_agents`。
-- `third_party/FISOR/configs/train_config.py` 提供兼容默认项：`decentralized_actor=False`、`num_agents=1`。
 
 ## 6. 常见问题（搭建与链路）
 

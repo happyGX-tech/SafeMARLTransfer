@@ -153,6 +153,13 @@ def _get_boundary_threshold(cfg):
     return cost_limit, 'qc_cost_limit'
 
 
+def _get_value_semantics(cfg):
+    critic_type = str(cfg.get('agent_kwargs', {}).get('critic_type', 'qc')).lower()
+    if critic_type == 'hj':
+        return 'learned feasible value V_h(s)', 'lower = more feasible', critic_type
+    return 'learned cost value V_c(s)', 'lower = more feasible', critic_type
+
+
 def _resolve_output_image_path(model_location, default_name):
     name = (FLAGS.output_image_name or '').strip()
     if name == '':
@@ -219,6 +226,7 @@ def _extract_semantic_geometry(env, agent_index):
 
 def plot_ctce_semantic_xy(env, agent, cfg, output_path):
     threshold, threshold_source = _get_boundary_threshold(cfg)
+    value_label, direction_note, critic_type = _get_value_semantics(cfg)
     obs, _ = env.reset(seed=int(FLAGS.seed))
     obs = np.asarray(obs, dtype=np.float32)
 
@@ -328,9 +336,9 @@ def plot_ctce_semantic_xy(env, agent, cfg, output_path):
 
     cb = plt.colorbar(contourf, ax=ax_learned, shrink=0.92, pad=0.02)
     cb.ax.tick_params(labelsize=10)
-    cb.set_label('learned safe value', fontsize=10)
+    cb.set_label(f'{value_label} ({direction_note})', fontsize=10)
 
-    title_suffix = f'boundary={threshold:.2f} ({threshold_source})'
+    title_suffix = f'boundary={threshold:.2f} ({threshold_source}), {direction_note}'
     if not has_real_boundary:
         title_suffix += ', no real crossing in sampled region'
     ax_learned.set_title(f'Learned Feasible Boundary + GT Overlay\n(agent_{int(FLAGS.semantic_agent_index)}), {title_suffix}', fontsize=12)
@@ -409,7 +417,7 @@ def plot_pr_pic(ax, agent, v, theta, cb=False):
     value_square = value_flatten.reshape(x1_grid.shape)
         
     '''
-    draw hj
+    draw HJ feasible value slice
     '''
     norm = colors.Normalize(vmin=-3.5, vmax=1.01)
     
@@ -430,6 +438,7 @@ def plot_pr_pic(ax, agent, v, theta, cb=False):
     if cb==True:
         cb = plt.colorbar(ct, ax=ax, shrink=0.8, pad=0.02, ticks=np.linspace(-3.2, 0.8, 6))
         cb.ax.tick_params(labelsize=ticks_size)
+        cb.set_label('learned feasible value V_h(s) (lower = more feasible)', fontsize=12)
 
         cbarlabels = cb.ax.get_yticklabels() 
         [label.set_fontname('Times New Roman') for label in cbarlabels]
@@ -516,6 +525,7 @@ def plot_ctce_value_slice(env, agent, cfg, output_path, x_index, y_index, span, 
     obs, _ = env.reset(seed=int(FLAGS.seed))
     obs = np.asarray(obs, dtype=np.float32).reshape(-1)
     obs_dim = obs.shape[0]
+    value_label, direction_note, critic_type = _get_value_semantics(cfg)
 
     if not (0 <= x_index < obs_dim and 0 <= y_index < obs_dim):
         raise ValueError(f'Invalid x_index/y_index for obs_dim={obs_dim}: x_index={x_index}, y_index={y_index}')
@@ -567,9 +577,8 @@ def plot_ctce_value_slice(env, agent, cfg, output_path, x_index, y_index, span, 
         ax.clabel(proxy_line, inline=True, fontsize=10, fmt=f'proxy@{proxy_level:.2f}')
 
     # Shade feasible side for quicker visual parsing.
-    critic_type = str(cfg.get('agent_kwargs', {}).get('critic_type', 'qc')).lower()
     if critic_type == 'hj':
-        feasible_mask = (value_square >= threshold).astype(np.int32)
+        feasible_mask = (value_square <= threshold).astype(np.int32)
     else:
         feasible_mask = (value_square <= threshold).astype(np.int32)
     ax.contourf(
@@ -583,8 +592,9 @@ def plot_ctce_value_slice(env, agent, cfg, output_path, x_index, y_index, span, 
 
     cb = plt.colorbar(ct, ax=ax, shrink=0.9, pad=0.02)
     cb.ax.tick_params(labelsize=11)
+    cb.set_label(f'{value_label} ({direction_note})', fontsize=11)
 
-    boundary_note = f'boundary={threshold:.2f} ({threshold_source})'
+    boundary_note = f'boundary={threshold:.2f} ({threshold_source}), {direction_note}'
     if not has_real_boundary:
         boundary_note += ', no real crossing in this slice'
     ax.set_title(f'CTCE Value Slice: obs[{x_index}] vs obs[{y_index}]\n{boundary_note}', fontsize=12)

@@ -1,5 +1,5 @@
 """
-环境测试脚本（Safety-Gymnasium）
+一键环境测试脚本（Safety-Gymnasium）
 用于验证当前项目环境创建、step、渲染和数据兼容性。
 """
 
