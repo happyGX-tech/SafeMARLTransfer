@@ -101,6 +101,11 @@ class DSRLDataset(Dataset):
                 else:
                     raise KeyError("Local dataset missing costs/h/cost field.")
 
+                if 'costs_per_agent' in keys:
+                    local_dataset['costs_per_agent'] = _read_array('costs_per_agent')
+                elif 'cost_per_agent' in keys:
+                    local_dataset['costs_per_agent'] = _read_array('cost_per_agent')
+
             return local_dataset
 
         if data_location is not None:

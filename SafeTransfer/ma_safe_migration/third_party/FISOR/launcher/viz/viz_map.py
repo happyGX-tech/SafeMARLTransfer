@@ -244,7 +244,8 @@ def plot_ctce_semantic_xy(env, agent, cfg, output_path):
         obs = np.asarray(obs, dtype=np.float32)
         while not done and total_steps < int(FLAGS.semantic_steps):
             v = agent.safe_value.apply_fn({'params': agent.safe_value.params}, jax.device_put(obs[None, ...]))
-            v_scalar = float(np.asarray(v).reshape(-1)[0])
+            v_np = np.asarray(v).reshape(-1)
+            v_scalar = float(v_np[int(FLAGS.semantic_agent_index)] if getattr(agent, 'oracle_cost_mode', False) and len(v_np) > 1 else v_np[0])
             xy = geom['get_agent_xy']()
 
             xy_points.append([float(xy[0]), float(xy[1])])
@@ -414,6 +415,9 @@ def plot_pr_pic(ax, agent, v, theta, cb=False):
     value = safe_value
 
     value_flatten = np.asarray(value)
+    if getattr(agent, 'oracle_cost_mode', False) and len(value_flatten.shape) > 1 and value_flatten.shape[-1] > 1:
+        value_flatten = value_flatten[:, int(FLAGS.semantic_agent_index)]
+        
     value_square = value_flatten.reshape(x1_grid.shape)
         
     '''
@@ -541,7 +545,10 @@ def plot_ctce_value_slice(env, agent, cfg, output_path, x_index, y_index, span, 
     batch_obs[:, y_index] = flat_y
 
     safe_value = agent.safe_value.apply_fn({'params': agent.safe_value.params}, jax.device_put(batch_obs))
-    value_square = np.asarray(safe_value).reshape(x_grid.shape)
+    value_flatten = np.asarray(safe_value)
+    if getattr(agent, 'oracle_cost_mode', False) and len(value_flatten.shape) > 1 and value_flatten.shape[-1] > 1:
+        value_flatten = value_flatten[:, int(FLAGS.semantic_agent_index)]
+    value_square = value_flatten.reshape(x_grid.shape)
 
     threshold, threshold_source = _get_boundary_threshold(cfg)
     sign_field = value_square - threshold

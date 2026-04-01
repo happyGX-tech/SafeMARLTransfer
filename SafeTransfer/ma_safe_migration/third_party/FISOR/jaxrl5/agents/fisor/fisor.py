@@ -69,6 +69,7 @@ class FISOR(Agent):
     actor_act_dim: int = struct.field(pytree_node=False)
     decentralized_actor: bool = struct.field(pytree_node=False)
     num_agents: int = struct.field(pytree_node=False)
+    oracle_cost_mode: bool = struct.field(pytree_node=False)
     local_obs_dim: int = struct.field(pytree_node=False)
     local_act_dim: int = struct.field(pytree_node=False)
     T: int = struct.field(pytree_node=False)
@@ -127,6 +128,7 @@ class FISOR(Agent):
         cost_ub: float = 200.,
         decentralized_actor: bool = False,
         num_agents: int = 1,
+        oracle_cost_mode: bool = False,
     ):
 
         rng = jax.random.PRNGKey(seed)
@@ -244,11 +246,14 @@ class FISOR(Agent):
         )
 
         if critic_type == 'qc':
-            critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-            critic_def = Ensemble(critic_cls, num=num_qs)
+            safe_critic_cls = partial(StateActionValue, base_cls=critic_base_cls, output_dim=num_agents if oracle_cost_mode else 1)
+            critic_def = Ensemble(safe_critic_cls, num=num_qs)
 
             # critic_cls = partial(Relu_StateActionValue, base_cls=critic_base_cls)
             # critic_def = Ensemble(critic_cls, num=num_qs)
+        else:
+            safe_critic_cls = partial(StateActionValue, base_cls=critic_base_cls, output_dim=num_agents if oracle_cost_mode else 1)
+            critic_def = Ensemble(safe_critic_cls, num=num_qs)
 
         safe_critic_params = critic_def.init(safe_critic_key, observations, actions)["params"]
         safe_critic = TrainState.create(
@@ -271,12 +276,14 @@ class FISOR(Agent):
                                   tx=value_optimiser)
 
         if critic_type == 'qc':
-            value_def = StateValue(base_cls=value_base_cls)
+            safe_value_def = StateValue(base_cls=value_base_cls, output_dim=num_agents if oracle_cost_mode else 1)
             # value_def = Relu_StateValue(base_cls=value_base_cls)
+        else:
+            safe_value_def = StateValue(base_cls=value_base_cls, output_dim=num_agents if oracle_cost_mode else 1)
 
-        safe_value_params = value_def.init(safe_value_key, observations)["params"]
+        safe_value_params = safe_value_def.init(safe_value_key, observations)["params"]
 
-        safe_value = TrainState.create(apply_fn=value_def.apply,
+        safe_value = TrainState.create(apply_fn=safe_value_def.apply,
                                   params=safe_value_params,
                                   tx=value_optimiser)
 
@@ -329,6 +336,7 @@ class FISOR(Agent):
             actor_act_dim=actor_action_dim,
             decentralized_actor=decentralized_actor,
             num_agents=num_agents,
+            oracle_cost_mode=oracle_cost_mode,
             local_obs_dim=local_obs_dim,
             local_act_dim=local_act_dim,
         )
@@ -411,9 +419,18 @@ class FISOR(Agent):
         def safe_value_loss_fn(safe_value_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
             vc = agent.safe_value.apply_fn({"params": safe_value_params}, batch["observations"])
 
-            safe_value_loss = safe_expectile_loss(qc - vc, agent.cost_critic_hyperparam).mean()
+            if agent.oracle_cost_mode:
+                safe_value_loss = safe_expectile_loss(qc - vc, agent.cost_critic_hyperparam).mean()
+                vc_mean = vc.mean()
+                vc_max = vc.max()
+                vc_min = vc.min()
+            else:
+                safe_value_loss = safe_expectile_loss(qc - vc, agent.cost_critic_hyperparam).mean()
+                vc_mean = vc.mean()
+                vc_max = vc.max()
+                vc_min = vc.min()
 
-            return safe_value_loss, {"safe_value_loss": safe_value_loss, "vc": vc.mean(), "vc_max": vc.max(), "vc_min": vc.min()}
+            return safe_value_loss, {"safe_value_loss": safe_value_loss, "vc": vc_mean, "vc_max": vc_max, "vc_min": vc_min}
 
         grads, info = jax.grad(safe_value_loss_fn, has_aux=True)(agent.safe_value.params)
         safe_value = agent.safe_value.apply_gradients(grads=grads)
@@ -426,11 +443,19 @@ class FISOR(Agent):
         next_vc = agent.safe_value.apply_fn(
             {"params": agent.safe_value.params}, batch["next_observations"]
         )
+        
+        if agent.oracle_cost_mode:
+            costs = batch["costs_per_agent"]
+            masks = jnp.expand_dims(batch["masks"], axis=-1)
+        else:
+            costs = batch["costs"]
+            masks = batch["masks"]
+
         if agent.critic_type == "hj":
-            qc_nonterminal = (1. - agent.discount) * batch["costs"] + agent.discount * jnp.maximum(batch["costs"], next_vc)
-            target_qc = qc_nonterminal * batch["masks"] + batch["costs"] * (1 - batch["masks"])
+            qc_nonterminal = (1. - agent.discount) * costs + agent.discount * jnp.maximum(costs, next_vc)
+            target_qc = qc_nonterminal * masks + costs * (1 - masks)
         elif agent.critic_type == 'qc':
-            target_qc = batch["costs"] + agent.discount * batch["masks"] * next_vc
+            target_qc = costs + agent.discount * masks * next_vc
         else:
             raise ValueError(f'Invalid critic type: {agent.critic_type}')
 
@@ -446,7 +471,7 @@ class FISOR(Agent):
                 "qc": qcs.mean(),
                 "qc_max": qcs.max(),
                 "qc_min": qcs.min(),
-                "costs": batch["costs"].mean()
+                "costs": costs.mean()
             }
 
         grads, info = jax.grad(safe_critic_loss_fn, has_aux=True)(agent.safe_critic.params)
@@ -538,7 +563,17 @@ class FISOR(Agent):
             safe_condition = jnp.where(vc <= 0. - eps, 1, 0) * jnp.where(qc<=0. - eps, 1, 0)
             
             cost_exp_adv = jnp.exp((vc-qc) * agent.cost_temperature)
-            reward_exp_adv = jnp.exp((q - v) * agent.reward_temperature)
+            
+            if agent.oracle_cost_mode:
+                # v and q are scalars per state, so we need to expand dimensions to match num_agents
+                # Q and V are centralised, shape (B, 1) or (B,) expanding to (B, 1) 
+                q_expanded = jnp.expand_dims(q, axis=-1) if len(q.shape) == 1 else q
+                v_expanded = jnp.expand_dims(v, axis=-1) if len(v.shape) == 1 else v
+                reward_exp_adv = jnp.exp((q_expanded - v_expanded) * agent.reward_temperature)
+                # Expand reward_exp_adv so it broadcasts over num_agents: (B, 1) -> (B, num_agents)
+                reward_exp_adv = jnp.repeat(reward_exp_adv, agent.num_agents, axis=-1)
+            else:
+                reward_exp_adv = jnp.exp((q - v) * agent.reward_temperature)
             
             unsafe_weights = unsafe_condition * jnp.clip(cost_exp_adv, 0, agent.cost_ub) ## ignore vc >0, qc>vc
             safe_weights = safe_condition * jnp.clip(reward_exp_adv, 0, 100)
@@ -550,9 +585,18 @@ class FISOR(Agent):
             raise ValueError(f'Invalid actor objective: {agent.actor_objective}')
 
         if agent.decentralized_actor:
-            actor_weights = jnp.repeat(weights, agent.num_agents, axis=0)
+            if agent.oracle_cost_mode:
+                # weights shape is (B, num_agents), we need (B * num_agents,)
+                actor_weights = weights.flatten()
+            else:
+                actor_weights = jnp.repeat(weights, agent.num_agents, axis=0)
         else:
-            actor_weights = weights
+            # Not fully supported to have centralized actor with oracle_cost_mode (what to do with multi costs?)
+            # But just mean it if needed
+            if agent.oracle_cost_mode:
+                actor_weights = weights.mean(axis=-1)
+            else:
+                actor_weights = weights
         
         def actor_loss_fn(
                 score_model_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
@@ -642,6 +686,10 @@ class FISOR(Agent):
         rng, key = jax.random.split(rng, 2)
         qs = compute_q(self.target_critic.apply_fn, self.target_critic.params, global_observations, actions)
         qcs = compute_safe_q(self.safe_target_critic.apply_fn, self.safe_target_critic.params, global_observations, actions)
+
+        if getattr(self, "oracle_cost_mode", False):
+            # Take the max cost over all agents as the worst-case cost of the action
+            qcs = qcs.max(axis=-1)
 
         if self.critic_type == "qc":
             qcs = qcs - self.qc_thres
