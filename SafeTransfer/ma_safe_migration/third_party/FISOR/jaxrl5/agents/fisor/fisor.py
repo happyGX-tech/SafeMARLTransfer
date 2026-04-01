@@ -445,7 +445,10 @@ class FISOR(Agent):
         )
         
         if agent.oracle_cost_mode:
-            costs = batch["costs_per_agent"]
+            if "costs_per_agent" in batch:
+                costs = batch["costs_per_agent"]
+            else:
+                costs = jnp.repeat(jnp.expand_dims(batch["costs"], axis=-1), agent.num_agents, axis=-1) / agent.num_agents
             masks = jnp.expand_dims(batch["masks"], axis=-1)
         else:
             costs = batch["costs"]
