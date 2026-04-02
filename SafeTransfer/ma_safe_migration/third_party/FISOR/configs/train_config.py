@@ -162,11 +162,11 @@ def get_config(config_string):
                 ),
                 project='FISOR',
                 seed=base_real_config['seed'],
-                max_steps=1000001,
+                max_steps=800001,
                 eval_episodes=20,
                 batch_size=512,
                 log_interval=1000,
-                eval_interval=50000,
+                eval_interval=100000,
                 normalize_returns=True,
             )
         ),
